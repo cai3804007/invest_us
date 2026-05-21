@@ -158,7 +158,7 @@ class MarketAnalyzer:
         g["RSP"] = self.f.get_latest("RSP")
 
         market_summary = []
-        for name, label in [("SPY", "标普500"), ("QQQ", "纳指100"), ("DIA", "道琼斯"),
+        for name, label in [("SPX", "标普500"), ("NDX", "纳指100"), ("DJI", "道琼斯"),
                             ("SOX", "半导体"), ("DXY", "美元"), ("US10Y", "10Y美债"),
                             ("GOLD", "黄金"), ("VIX", "VIX")]:
             s = self.f.get_series(name)

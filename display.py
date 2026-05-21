@@ -548,9 +548,9 @@ class MarkdownReport:
                 chg_str = f"{chg:+.1f}"
 
             if pct > 0:
-                arrow = "🔺"
+                arrow = "🔴"
             elif pct < 0:
-                arrow = "🔻"
+                arrow = "🟢"
             else:
                 arrow = "➖"
 

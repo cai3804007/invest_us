@@ -7,9 +7,11 @@ TAVILY_API_KEYS = os.environ.get("TAVILY_API_KEYS", "")
 SERVERCHAN3_SENDKEY = os.environ.get("SERVERCHAN3_SENDKEY", "")
 
 YAHOO_TICKERS = {
+    "SPX": "^GSPC",
+    "NDX": "^NDX",
+    "DJI": "^DJI",
     "SPY": "SPY",
     "QQQ": "QQQ",
-    "DIA": "DIA",
     "RSP": "RSP",
     "SOX": "^SOX",
     "SOXX": "SOXX",
