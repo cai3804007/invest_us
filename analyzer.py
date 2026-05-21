@@ -154,7 +154,25 @@ class MarketAnalyzer:
         g["SOX"] = self.f.get_latest("SOX")
         g["SPY"] = self.f.get_latest("SPY")
         g["QQQ"] = self.f.get_latest("QQQ")
+        g["DIA"] = self.f.get_latest("DIA")
         g["RSP"] = self.f.get_latest("RSP")
+
+        market_summary = []
+        for name, label in [("SPY", "标普500"), ("QQQ", "纳指100"), ("DIA", "道琼斯"),
+                            ("SOX", "半导体"), ("DXY", "美元"), ("US10Y", "10Y美债"),
+                            ("GOLD", "黄金"), ("VIX", "VIX")]:
+            s = self.f.get_series(name)
+            if s is not None and len(s) >= 2:
+                price = float(s.iloc[-1])
+                prev = float(s.iloc[-2])
+                chg = price - prev
+                chg_pct = (chg / prev) * 100
+                is_yield = name == "US10Y"
+                market_summary.append({
+                    "name": name, "label": label, "price": price,
+                    "change": chg, "change_pct": chg_pct, "is_yield": is_yield,
+                })
+        g["MARKET_SUMMARY"] = market_summary
         g["SAHM"] = self.f.get_fred_latest("SAHM")
         g["UNRATE"] = self.f.get_fred_latest("UNRATE")
 

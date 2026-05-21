@@ -503,6 +503,7 @@ class MarkdownReport:
 
     def render(self):
         self._header()
+        self._market_overview()
         self._risk_summary()
         self._cycle_section()
         self._ai_section()
@@ -517,15 +518,50 @@ class MarkdownReport:
         self.lines.append(text)
 
     def _header(self):
-        now = datetime.now().strftime("%Y-%m-%d %H:%M UTC")
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
         self._w("# 📊 美股市场监控报告")
         self._w(f"> 更新时间: {now}")
+        self._w()
+
+    def _market_overview(self):
+        summary = self.r["indicators"].get("MARKET_SUMMARY", [])
+        if not summary:
+            return
+
+        self._w("## 📈 今日行情")
+        self._w()
+        for item in summary:
+            chg = item["change"]
+            pct = item["change_pct"]
+
+            if item["is_yield"]:
+                price_str = f"{item['price']:.2f}%"
+                chg_str = f"{chg:+.2f}"
+            elif item["name"] == "VIX":
+                price_str = f"{item['price']:.1f}"
+                chg_str = f"{chg:+.1f}"
+            elif item["price"] > 1000:
+                price_str = f"{item['price']:,.0f}"
+                chg_str = f"{chg:+,.0f}"
+            else:
+                price_str = f"{item['price']:.1f}"
+                chg_str = f"{chg:+.1f}"
+
+            if pct > 0:
+                arrow = "🔺"
+            elif pct < 0:
+                arrow = "🔻"
+            else:
+                arrow = "➖"
+
+            self._w(f"- {arrow} **{item['label']}** {price_str}（{chg_str} / {pct:+.2f}%）")
         self._w()
 
     def _risk_summary(self):
         score = self.r["risk_score"]
         level = self.r["risk_level"]
         phase = self.r["market_phase"]
+        rec = self.r["recommendation"]
 
         if score <= 0:
             badge = "🟢"
@@ -538,13 +574,15 @@ class MarkdownReport:
         else:
             badge = "🔴🔴"
 
-        self._w("## 综合评估")
+        cycle = self.r.get("economic_cycle", {})
+        cycle_cn = cycle.get("cycle_cn", "N/A")
+
+        self._w("## 🎯 综合评估")
         self._w()
-        self._w(f"| 项目 | 结果 |")
-        self._w(f"|------|------|")
-        self._w(f"| 风险评分 | {badge} **{score}** |")
-        self._w(f"| 风险等级 | {level} |")
-        self._w(f"| 市场阶段 | {phase} |")
+        self._w(f"- 风险评分: {badge} **{score}** — {level}")
+        self._w(f"- 市场阶段: {phase}")
+        self._w(f"- 操作建议: **{rec}**")
+        self._w(f"- 经济周期: {cycle_cn}")
         self._w()
 
 
@@ -821,11 +859,11 @@ class MarkdownReport:
         else:
             emoji = "📋"
 
-        self._w("## 📋 操作建议")
+        self._w("---")
         self._w()
-        self._w(f"> {emoji} **{rec}**")
+        self._w(f"> {emoji} **操作建议: {rec}**")
         self._w(f">")
         self._w(f"> {detail}")
         self._w()
         self._w("---")
-        self._w("*⚠️ 免责声明: 本工具仅供参考，不构成投资建议。投资有风险，决策需谨慎。*")
+        self._w("*⚠️ 本工具仅供参考，不构成投资建议。投资有风险，决策需谨慎。*")
