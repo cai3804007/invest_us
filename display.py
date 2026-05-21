@@ -52,6 +52,7 @@ class Dashboard:
     def render(self):
         self.console.print()
         self._header()
+        self._market_overview()
         self._risk_summary()
         self._cycle_panel()
         self._indicator_tables()
@@ -71,6 +72,53 @@ class Dashboard:
         subtitle = Text(f"更新时间: {now}", style="dim")
         content = Text.assemble(title, "\n", subtitle)
         self.console.print(Panel(content, border_style="cyan", expand=True))
+
+    # ------------------------------------------------------------------
+    # Market overview (today's indices)
+    # ------------------------------------------------------------------
+
+    def _market_overview(self):
+        summary = self.r["indicators"].get("MARKET_SUMMARY", [])
+        if not summary:
+            return
+
+        t = Table(title="📈 今日行情", show_header=True, header_style="bold cyan",
+                  expand=True, show_lines=False, padding=(0, 1))
+        t.add_column("指数", style="bold", min_width=8)
+        t.add_column("点位", justify="right", min_width=10)
+        t.add_column("涨跌", justify="right", min_width=10)
+        t.add_column("涨跌幅", justify="right", min_width=8)
+
+        for item in summary:
+            chg = item["change"]
+            pct = item["change_pct"]
+
+            if item["is_yield"]:
+                price_str = f"{item['price']:.2f}%"
+                chg_str = f"{chg:+.2f}"
+            elif item["name"] == "VIX":
+                price_str = f"{item['price']:.1f}"
+                chg_str = f"{chg:+.1f}"
+            elif item["price"] > 1000:
+                price_str = f"{item['price']:,.0f}"
+                chg_str = f"{chg:+,.0f}"
+            else:
+                price_str = f"{item['price']:.1f}"
+                chg_str = f"{chg:+.1f}"
+
+            pct_str = f"{pct:+.2f}%"
+            if pct > 0:
+                color = "green"
+            elif pct < 0:
+                color = "red"
+            else:
+                color = "white"
+
+            t.add_row(item["label"], price_str,
+                      f"[{color}]{chg_str}[/{color}]",
+                      f"[{color}]{pct_str}[/{color}]")
+
+        self.console.print(t)
 
     # ------------------------------------------------------------------
     # Risk summary
