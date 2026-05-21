@@ -1,0 +1,16 @@
+{
+  "daily_report": {
+    "enabled": true,
+    "description": "每日市场监控报告 (美股交易策略)",
+    "cron": "30 21 * * 1-5",
+    "cron_description": "UTC 21:30 周一至周五 = 北京时间次日05:30 ≈ 美股收盘后"
+  },
+  "cycle_report": {
+    "enabled": true,
+    "description": "经济周期评估报告 (长期投资策略)",
+    "interval_days": 7,
+    "run_on_weekday": 6,
+    "cron": "0 14 * * 6",
+    "cron_description": "UTC 14:00 每周六 = 北京时间周六22:00，周末复盘"
+  }
+}

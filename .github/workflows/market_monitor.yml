@@ -1,0 +1,105 @@
+name: Market Monitor
+
+# ============================================================
+# 定时执行配置
+# 修改下方的 cron 表达式即可控制执行时间
+#
+# cron 格式: 分钟 小时 日 月 星期
+#   分钟:  0-59
+#   小时:  0-23 (注意: 这里是 UTC 时间, 北京时间 = UTC + 8)
+#   日:    1-31
+#   月:    1-12
+#   星期:  0=周日, 1=周一, 2=周二 ... 6=周六
+#
+# 常见配置示例:
+#   需求                  cron 表达式          北京时间
+#   每日美股收盘后        '30 21 * * 1-5'      周一至周五 05:30
+#   每周六复盘            '0 14 * * 6'         周六 22:00
+#   每两周(1号/15号)      '0 14 1,15 * *'      每月1/15号 22:00
+#   每7天一次             '0 14 */7 * *'       每7天 22:00
+#   每月一次(1号)         '0 14 1 * *'         每月1号 22:00
+#   只要工作日            '0 22 * * 1-5'       周一至周五 06:00
+#
+# 时区换算: 北京时间 = UTC + 8小时
+#   想要北京时间 22:00 执行 → 写 UTC 14:00 → '0 14 ...'
+#   想要北京时间 06:00 执行 → 写 UTC 22:00 → '0 22 ...'
+# ============================================================
+
+on:
+  schedule:
+    # 每日报告: 周一至周五 (北京时间09:00)
+    - cron: '0 1 * * 1-5'
+
+  workflow_dispatch:
+    inputs:
+      report_type:
+        description: 'Report type'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - daily
+          - cycle
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+
+    env:
+      FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      SERPAPI_API_KEYS: ${{ secrets.SERPAPI_API_KEYS }}
+      TAVILY_API_KEYS: ${{ secrets.TAVILY_API_KEYS }}
+      SERVERCHAN3_SENDKEY: ${{ secrets.SERVERCHAN3_SENDKEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Determine report type
+        id: report_type
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "type=${{ inputs.report_type }}" >> "$GITHUB_OUTPUT"
+          elif [ "$(date -u +%u)" = "6" ]; then
+            echo "type=cycle" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=daily" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run Market Monitor
+        run: |
+          python main.py --markdown --no-push > report.md 2>run.log || true
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          cat run.log >&2
+
+      - name: Push to phone
+        if: always()
+        run: |
+          python -c "
+          from notifier import push_to_serverchan
+          report_type = '${{ steps.report_type.outputs.type }}'
+          type_label = {'daily': '日报', 'cycle': '周期', 'all': '综合'}.get(report_type, '')
+          title = open('report.md').read().split('\n')[0].replace('# ', '')
+          if type_label:
+              title = f'[{type_label}] {title}'
+          content = open('report.md').read()
+          push_to_serverchan(title, content)
+          " 2>&1 || echo "Push failed, continuing..."
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-report-${{ steps.report_type.outputs.type }}-${{ github.run_number }}
+          path: report.md
+          retention-days: 90
