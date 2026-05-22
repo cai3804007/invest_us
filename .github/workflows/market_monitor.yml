@@ -27,8 +27,8 @@ name: Market Monitor
 
 on:
   schedule:
-    # 每日报告: 周一至周五 (北京时间09:00)
-    - cron: '0 1 * * 1-5'
+    # 北京时间 周二到周六 上午09:07
+    - cron: '7 1 * * 2-6'
 
   workflow_dispatch:
     inputs:
