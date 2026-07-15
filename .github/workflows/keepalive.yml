@@ -1,0 +1,31 @@
+name: Keepalive
+
+# 每 50 天自动提交一次, 防止 GitHub 因 60 天无活动而禁用定时 workflow
+# GitHub 规则: 仓库 60 天无 push/commit 活动, 所有 scheduled workflow 会被自动禁用
+
+on:
+  schedule:
+    # 每月 1 号和 15 号 UTC 00:00 执行 (约每 15 天一次, 远低于 60 天限制)
+    - cron: '0 0 1,15 * *'
+  workflow_dispatch:  # 也支持手动触发
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Keepalive commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # 更新时间戳文件
+          echo "Last keepalive: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" > .keepalive
+          git add .keepalive
+          # 只在有变化时提交 (首次运行或时间戳变化时)
+          git diff --cached --quiet || git commit -m "chore: keepalive $(date -u '+%Y-%m-%d')"
+          git push
