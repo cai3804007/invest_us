@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from config import MA50, MA200, MA250, RSI_PERIOD, LEADING_STOCKS
+from config import MA50, MA200, MA250, RSI_PERIOD, LEADING_STOCKS, POSITION_TARGETS
 
 
 # ======================================================================
@@ -101,6 +101,7 @@ class MarketAnalyzer:
         rec, rec_detail = self._recommendation()
 
         cycle_result = self._detect_economic_cycle()
+        position_signals = self._analyze_position_targets()
 
         return {
             "indicators": self.indicators,
@@ -113,6 +114,7 @@ class MarketAnalyzer:
             "leader_health": self.leader_health,
             "combos": self.combos,
             "economic_cycle": cycle_result,
+            "position_signals": position_signals,
         }
 
     # ------------------------------------------------------------------
@@ -974,6 +976,262 @@ class MarketAnalyzer:
             "cpi_yoy": cpi_yoy,
             "allocation": allocation,
         }
+
+    # ------------------------------------------------------------------
+    # Position-target signal analysis (QQQM / SPYM)
+    # ------------------------------------------------------------------
+
+    def _analyze_position_targets(self):
+        """Compute per-target buy/sell scores for each POSITION_TARGET."""
+        g = self.indicators
+        results = {}
+
+        # --- Layer 1: Macro gate (shared across all targets) ---
+        sahm = g.get("SAHM") or 0
+        fg = g.get("FEAR_GREED")
+        hy = g.get("HY_OAS")
+        vix_val = g.get("VIX") or 0
+
+        macro_gate = "正常"
+        macro_locked_no_buy = False
+        macro_downgrade = False
+        macro_bonus = 0
+
+        if sahm >= 0.5:
+            macro_gate = "衰退锁定"
+            macro_locked_no_buy = True
+        elif fg is not None and fg > 85:
+            macro_gate = "贪婪锁定"
+            macro_locked_no_buy = True
+
+        if hy is not None and hy > 500:
+            macro_downgrade = True
+            if macro_gate == "正常":
+                macro_gate = "信用风险"
+
+        if fg is not None and fg < 20:
+            macro_bonus += 2
+
+        for target_name, cfg in POSITION_TARGETS.items():
+            ticker = cfg["ticker"]
+            label = cfg["label"]
+            bench_vix_key = cfg["benchmark_vix"]
+
+            series = self.f.get_series(ticker)
+            if series is None or len(series) < MA200:
+                results[target_name] = {
+                    "label": label, "price": None,
+                    "action": "数据不足", "action_level": "unknown",
+                    "final_score": 0, "details": ["价格数据不足以计算MA200"],
+                    "macro_gate": macro_gate,
+                }
+                continue
+
+            price = float(series.iloc[-1])
+            ma50_s = calc_sma(series, MA50)
+            ma200_s = calc_sma(series, MA200)
+            rsi_s = calc_rsi(series)
+            macd_line, sig_line, _ = calc_macd(series)
+
+            ma50_val = latest(ma50_s)
+            ma200_val = latest(ma200_s)
+            rsi_val = latest(rsi_s)
+
+            # 52-week high drawdown
+            high_52w = float(series.iloc[-252:].max()) if len(series) >= 252 else float(series.max())
+            drawdown = (price / high_52w - 1) * 100 if high_52w > 0 else 0
+
+            # MACD cross detection (last 2 bars)
+            macd_cross = None
+            if macd_line is not None and sig_line is not None and len(macd_line) >= 2:
+                prev_diff = float(macd_line.iloc[-2] - sig_line.iloc[-2])
+                curr_diff = float(macd_line.iloc[-1] - sig_line.iloc[-1])
+                macd_val = float(macd_line.iloc[-1])
+                if prev_diff <= 0 and curr_diff > 0:
+                    macd_cross = "golden_cross"
+                elif prev_diff >= 0 and curr_diff < 0:
+                    macd_cross = "death_cross"
+            else:
+                macd_val = None
+
+            # RSI divergence
+            divergence = check_rsi_divergence(series, rsi_s)
+
+            # --- Layer 2: Technical scoring ---
+            score = 0
+            details = []
+
+            # Price vs MA200
+            pct_ma200 = pct_above(price, ma200_val)
+            if pct_ma200 is not None:
+                if pct_ma200 < -10:
+                    score += 3
+                    details.append(f"距MA200 {pct_ma200:.1f}% 极端超卖(+3)")
+                elif pct_ma200 < -5:
+                    score += 2
+                    details.append(f"距MA200 {pct_ma200:.1f}% 深度回调(+2)")
+                elif -3 <= pct_ma200 <= 2:
+                    score += 1
+                    details.append(f"距MA200 {pct_ma200:.1f}% 支撑试探(+1)")
+                elif pct_ma200 > 20:
+                    score -= 2
+                    details.append(f"距MA200 +{pct_ma200:.1f}% 显著过热(-2)")
+                elif pct_ma200 > 15:
+                    score -= 1
+                    details.append(f"距MA200 +{pct_ma200:.1f}% 过热警告(-1)")
+
+            # Price below MA50 but above MA200
+            pct_ma50 = pct_above(price, ma50_val)
+            if pct_ma50 is not None and pct_ma200 is not None:
+                if pct_ma50 < 0 and pct_ma200 > 0:
+                    score += 1
+                    details.append(f"跌破MA50但仍在MA200上方(+1)")
+
+            # RSI
+            if rsi_val is not None:
+                if rsi_val < 25:
+                    score += 3
+                    details.append(f"RSI={rsi_val:.1f} 极端超卖(+3)")
+                elif rsi_val < 30:
+                    score += 2
+                    details.append(f"RSI={rsi_val:.1f} 超卖(+2)")
+                elif rsi_val < 40:
+                    score += 1
+                    details.append(f"RSI={rsi_val:.1f} 接近超卖(+1)")
+                elif rsi_val > 80:
+                    score -= 2
+                    details.append(f"RSI={rsi_val:.1f} 超买(-2)")
+                elif rsi_val > 70:
+                    score -= 1
+                    details.append(f"RSI={rsi_val:.1f} 接近超买(-1)")
+
+            # MACD cross
+            if macd_cross == "golden_cross" and macd_val is not None and macd_val < 0:
+                score += 2
+                details.append("MACD零轴下金叉(+2)")
+            elif macd_cross == "death_cross" and macd_val is not None and macd_val > 0:
+                score -= 1
+                details.append("MACD零轴上死叉(-1)")
+
+            # 52-week high drawdown
+            if drawdown <= -20:
+                score += 3
+                details.append(f"距52周高 {drawdown:.1f}% 技术性熊市(+3)")
+            elif drawdown <= -15:
+                score += 2
+                details.append(f"距52周高 {drawdown:.1f}% 深度调整(+2)")
+            elif drawdown <= -10:
+                score += 1
+                details.append(f"距52周高 {drawdown:.1f}% 常规回调(+1)")
+
+            # RSI divergence
+            if divergence == "bullish":
+                score += 2
+                details.append("RSI底背离(+2)")
+            elif divergence == "bearish":
+                score -= 2
+                details.append("RSI顶背离(-2)")
+
+            # VIX + oversold combo
+            bench_vix = g.get(bench_vix_key) or vix_val
+            if bench_vix > 30 and rsi_val is not None and rsi_val < 35:
+                score += 2
+                details.append(f"{bench_vix_key}={bench_vix:.1f}+RSI超卖 黄金坑(+2)")
+
+            # Fear&Greed + MA200 combo
+            if fg is not None and fg < 20 and pct_ma200 is not None and abs(pct_ma200) < 5:
+                score += 2
+                details.append(f"F&G={fg:.0f} 极恐+MA200支撑(+2)")
+
+            # Fear&Greed + RSI overbought combo
+            if fg is not None and fg > 80 and rsi_val is not None and rsi_val > 65:
+                score -= 2
+                details.append(f"F&G={fg:.0f}+RSI={rsi_val:.1f} 过热(-2)")
+
+            # Consecutive down days + cumulative decline
+            # (thresholds from 30-year backtest of QQQ/SPY)
+            if len(series) >= 10:
+                consec_days = 0
+                for j in range(len(series) - 1, 0, -1):
+                    if series.iloc[j] < series.iloc[j - 1]:
+                        consec_days += 1
+                    else:
+                        break
+                if consec_days >= 3:
+                    streak_start_price = float(series.iloc[-(consec_days + 1)])
+                    cum_decline = (price / streak_start_price - 1) * 100
+                    # Use highest matching tier only (no double counting)
+                    if consec_days >= 5 and cum_decline <= -7:
+                        score += 3
+                        details.append(f"连续{consec_days}天下跌 累计{cum_decline:.1f}% 重仓级(+3)")
+                    elif consec_days >= 4 and cum_decline <= -5:
+                        score += 2
+                        details.append(f"连续{consec_days}天下跌 累计{cum_decline:.1f}% 加仓级(+2)")
+                    elif consec_days >= 3 and cum_decline <= -4:
+                        score += 1
+                        details.append(f"连续{consec_days}天下跌 累计{cum_decline:.1f}% 关注级(+1)")
+
+            raw_score = score
+
+            # --- Layer 1 macro adjustment ---
+            score += macro_bonus
+            if macro_bonus > 0:
+                details.append(f"宏观极恐加权(+{macro_bonus})")
+
+            # --- Layer 3: Score -> action ---
+            action, action_level, position_change = self._score_to_action(score)
+
+            # Macro gate overrides
+            if macro_locked_no_buy and score > 0:
+                if action_level in ("strong_buy", "buy", "consider_buy"):
+                    action = f"观望（{macro_gate}）"
+                    action_level = "hold"
+                    position_change = "维持"
+                    details.append(f"⚠️ {macro_gate}: 技术面看多但宏观禁止加仓")
+
+            if macro_downgrade and action_level == "strong_buy":
+                action = "建议加仓（信用风险降级）"
+                action_level = "buy"
+                position_change = "5%"
+                details.append("⚠️ HY OAS>500bp: 强烈加仓降级为建议加仓")
+
+            results[target_name] = {
+                "label": label,
+                "price": price,
+                "ma50": ma50_val,
+                "ma200": ma200_val,
+                "rsi": rsi_val,
+                "macd_cross": macd_cross,
+                "drawdown_from_high": drawdown,
+                "high_52w": high_52w,
+                "pct_ma200": pct_ma200,
+                "pct_ma50": pct_ma50,
+                "raw_score": raw_score,
+                "macro_adjustment": macro_bonus,
+                "final_score": score,
+                "action": action,
+                "action_level": action_level,
+                "position_change": position_change,
+                "details": details,
+                "macro_gate": macro_gate,
+            }
+
+        return results
+
+    @staticmethod
+    def _score_to_action(score):
+        if score >= 6:
+            return ("强烈加仓", "strong_buy", "8-10%")
+        elif score >= 4:
+            return ("建议加仓", "buy", "5%")
+        elif score >= 2:
+            return ("可考虑加仓", "consider_buy", "2-3%")
+        elif score >= -1:
+            return ("观望", "hold", "维持")
+        elif score >= -3:
+            return ("考虑减仓", "consider_sell", "减5%")
+        else:
+            return ("建议减仓", "sell", "减10-15%")
 
     def _cycle_allocation(self, cycle, inflation_high):
         allocations = {

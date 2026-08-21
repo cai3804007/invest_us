@@ -63,7 +63,19 @@ def main():
                 score = result["risk_score"]
                 level = result["risk_level"]
                 rec = result["recommendation"]
-                title = f"📊 美股监控 | 风险{score} {level} | {rec}"
+
+                # Annotate title with position signals
+                pos_tags = []
+                pos_sigs = result.get("position_signals", {})
+                for tname, sig in pos_sigs.items():
+                    al = sig.get("action_level", "")
+                    if al in ("strong_buy", "buy"):
+                        pos_tags.append(f"{tname}加仓")
+                    elif al in ("consider_sell", "sell"):
+                        pos_tags.append(f"{tname}减仓")
+                pos_suffix = " | " + "+".join(pos_tags) if pos_tags else ""
+
+                title = f"📊 美股监控 | 风险{score} {level} | {rec}{pos_suffix}"
                 push_to_serverchan(title, md_content, console=console)
         else:
             dashboard = Dashboard(result)
@@ -81,7 +93,19 @@ def main():
                 score = result["risk_score"]
                 level = result["risk_level"]
                 rec = result["recommendation"]
-                title = f"📊 美股监控 | 风险{score} {level} | {rec}"
+
+                # Annotate title with position signals
+                pos_tags = []
+                pos_sigs = result.get("position_signals", {})
+                for tname, sig in pos_sigs.items():
+                    al = sig.get("action_level", "")
+                    if al in ("strong_buy", "buy"):
+                        pos_tags.append(f"{tname}加仓")
+                    elif al in ("consider_sell", "sell"):
+                        pos_tags.append(f"{tname}减仓")
+                pos_suffix = " | " + "+".join(pos_tags) if pos_tags else ""
+
+                title = f"📊 美股监控 | 风险{score} {level} | {rec}{pos_suffix}"
                 push_to_serverchan(title, md_content, console=console)
 
     except KeyboardInterrupt:

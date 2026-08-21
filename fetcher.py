@@ -3,7 +3,7 @@ import pandas as pd
 import requests
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from config import YAHOO_TICKERS, LEADING_STOCKS, FRED_SERIES, FRED_API_KEY, LOOKBACK_CALENDAR_DAYS
+from config import YAHOO_TICKERS, LEADING_STOCKS, FRED_SERIES, FRED_API_KEY, LOOKBACK_CALENDAR_DAYS, POSITION_TARGETS
 
 
 class MarketDataFetcher:
@@ -46,6 +46,11 @@ class MarketDataFetcher:
     def _fetch_yahoo(self, console=None):
         all_items = [(n, s) for n, s in YAHOO_TICKERS.items()]
         all_items += [(s, s) for s in LEADING_STOCKS]
+        # Add position-target tickers (e.g. QQQM) that aren't already covered
+        for name, cfg in POSITION_TARGETS.items():
+            ticker = cfg["ticker"]
+            if ticker not in dict(all_items).values():
+                all_items.append((ticker, ticker))
 
         if console:
             console.print(f"  [dim]Yahoo Finance: {len(all_items)} 个标的...[/]")

@@ -47,3 +47,19 @@ MA50 = 50
 MA200 = 200
 MA250 = 250
 RSI_PERIOD = 14
+
+# ------------------------------------------------------------------
+# Position-adding / reducing indicator targets
+# ------------------------------------------------------------------
+POSITION_TARGETS = {
+    "QQQM": {
+        "ticker": "QQQM",         # Yahoo Finance ticker for data
+        "label": "QQQM (纳指100)",
+        "benchmark_vix": "VXN",   # corresponding volatility index
+    },
+    "SPYM": {
+        "ticker": "SPY",          # SPYM tracks S&P 500; use SPY data
+        "label": "SPYM (标普500)",
+        "benchmark_vix": "VIX",
+    },
+}

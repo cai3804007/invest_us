@@ -55,6 +55,7 @@ class Dashboard:
         self._market_overview()
         self._risk_summary()
         self._cycle_panel()
+        self._position_panel()
         self._indicator_tables()
         self._leader_table()
         self._signals_panel()
@@ -256,6 +257,78 @@ class Dashboard:
             t.add_row(labels[key], weight, detail)
 
         self.console.print(t)
+
+    # ------------------------------------------------------------------
+    # Position target signals panel
+    # ------------------------------------------------------------------
+
+    def _position_panel(self):
+        pos = self.r.get("position_signals")
+        if not pos:
+            return
+
+        t = Table(title="\U0001f4ca \u6807\u7684\u52a0\u4ed3\u4fe1\u53f7", show_header=True,
+                  header_style="bold magenta", expand=True, show_lines=True, padding=(0, 1))
+        t.add_column("\u6807\u7684", style="bold", min_width=14)
+        t.add_column("\u4ef7\u683c", justify="right", min_width=8)
+        t.add_column("MA50", justify="right", min_width=8)
+        t.add_column("MA200", justify="right", min_width=8)
+        t.add_column("RSI", justify="right", min_width=6)
+        t.add_column("\u8ddd52\u5468\u9ad8", justify="right", min_width=8)
+        t.add_column("\u8bc4\u5206", justify="center", min_width=6)
+        t.add_column("\u64cd\u4f5c\u5efa\u8bae", min_width=16)
+
+        for name, sig in pos.items():
+            if sig.get("price") is None:
+                t.add_row(sig["label"], "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", sig["action"])
+                continue
+
+            price_str = f"${sig['price']:.2f}"
+            ma50_str = _fmt(sig.get("ma50"), 2) if sig.get("ma50") else "N/A"
+            ma200_str = _fmt(sig.get("ma200"), 2) if sig.get("ma200") else "N/A"
+            rsi_str = _fmt(sig.get("rsi"), 1) if sig.get("rsi") else "N/A"
+            dd = sig.get("drawdown_from_high")
+            dd_str = f"{dd:.1f}%" if dd is not None else "N/A"
+
+            score = sig["final_score"]
+            level = sig["action_level"]
+            if level in ("strong_buy", "buy"):
+                score_style = "bold green"
+            elif level == "consider_buy":
+                score_style = "green"
+            elif level == "hold":
+                score_style = "cyan"
+            elif level == "consider_sell":
+                score_style = "yellow"
+            else:
+                score_style = "bold red"
+
+            action_str = f"{sig['action']}\n\u4ed3\u4f4d: {sig['position_change']}"
+
+            t.add_row(
+                sig["label"], price_str, ma50_str, ma200_str,
+                rsi_str, dd_str,
+                f"[{score_style}]{score}[/{score_style}]",
+                f"[{score_style}]{action_str}[/{score_style}]",
+            )
+
+        self.console.print(t)
+
+        # Detail panel
+        detail_lines = []
+        for name, sig in pos.items():
+            if not sig.get("details"):
+                continue
+            gate_label = f"  [dim]\u5b8f\u89c2: {sig['macro_gate']}[/]"
+            detail_lines.append(f"[bold]{sig['label']}[/]{gate_label}")
+            for d in sig["details"]:
+                color = "green" if "(+" in d else "red" if "(-" in d else "dim"
+                detail_lines.append(f"  [{color}]\u2022 {d}[/{color}]")
+
+        if detail_lines:
+            self.console.print(Panel("\n".join(detail_lines),
+                                    title="[bold]\U0001f4cb \u52a0\u4ed3\u4fe1\u53f7\u660e\u7ec6[/]",
+                                    border_style="magenta"))
 
     # ------------------------------------------------------------------
     # Indicator tables
@@ -554,6 +627,7 @@ class MarkdownReport:
         self._market_overview()
         self._risk_summary()
         self._cycle_section()
+        self._position_section()
         self._ai_section()
         self._indicator_guide()
         self._leader_table()
@@ -774,6 +848,63 @@ class MarkdownReport:
         for line in self.ai_summary.strip().split("\n"):
             self._w(f"> {line}")
         self._w()
+
+    def _position_section(self):
+        pos = self.r.get("position_signals")
+        if not pos:
+            return
+
+        self._w("## \U0001f4ca \u6807\u7684\u52a0\u4ed3\u4fe1\u53f7")
+        self._w()
+
+        for name, sig in pos.items():
+            if sig.get("price") is None:
+                self._w(f"### {sig['label']}")
+                self._w(f"> \u26a0\ufe0f {sig['action']}")
+                self._w()
+                continue
+
+            level = sig["action_level"]
+            if level in ("strong_buy", "buy"):
+                emoji = "\U0001f7e2"
+            elif level == "consider_buy":
+                emoji = "\U0001f535"
+            elif level == "hold":
+                emoji = "\u26aa"
+            elif level == "consider_sell":
+                emoji = "\U0001f7e1"
+            else:
+                emoji = "\U0001f534"
+
+            self._w(f"### {emoji} {sig['label']}")
+            self._w()
+            self._w(f"| \u6307\u6807 | \u503c |")
+            self._w(f"|------|------|")
+            self._w(f"| \u5f53\u524d\u4ef7 | ${sig['price']:.2f} |")
+            ma50 = sig.get('ma50')
+            ma200 = sig.get('ma200')
+            rsi = sig.get('rsi')
+            pct200 = sig.get('pct_ma200')
+            dd = sig.get('drawdown_from_high')
+            self._w(f"| MA50 | {ma50:.2f} |" if ma50 else "| MA50 | N/A |")
+            self._w(f"| MA200 | {ma200:.2f} |" if ma200 else "| MA200 | N/A |")
+            self._w(f"| \u8dddMA200 | {pct200:+.1f}% |" if pct200 is not None else "| \u8dddMA200 | N/A |")
+            self._w(f"| RSI(14) | {rsi:.1f} |" if rsi else "| RSI(14) | N/A |")
+            mc = sig.get('macd_cross')
+            mc_label = "\u91d1\u53c9" if mc == "golden_cross" else "\u6b7b\u53c9" if mc == "death_cross" else "\u65e0"
+            self._w(f"| MACD\u4ea4\u53c9 | {mc_label} |")
+            self._w(f"| \u8ddd52\u5468\u9ad8 | {dd:.1f}% |" if dd is not None else "| \u8ddd52\u5468\u9ad8 | N/A |")
+            self._w(f"| **\u7efc\u5408\u8bc4\u5206** | **{sig['final_score']}** |")
+            self._w(f"| **\u64cd\u4f5c\u5efa\u8bae** | **{emoji} {sig['action']}** |")
+            self._w(f"| \u4ed3\u4f4d\u53d8\u52a8 | {sig['position_change']} |")
+            self._w(f"| \u5b8f\u89c2\u73af\u5883 | {sig['macro_gate']} |")
+            self._w()
+
+            if sig.get("details"):
+                self._w("**\u89e6\u53d1\u6761\u4ef6:**")
+                for d in sig["details"]:
+                    self._w(f"- {d}")
+                self._w()
 
     def _indicator_guide(self):
         g = self.r["indicators"]
