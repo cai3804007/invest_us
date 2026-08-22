@@ -7,7 +7,26 @@ from analyzer import MarketAnalyzer
 from display import Dashboard, MarkdownReport
 from news import NewsFetcher
 from ai_summary import generate_ai_summary
-from notifier import push_to_serverchan
+from notifier import build_report_title, push_to_serverchan
+
+HELP = """[bold]美股市场监控工具[/]
+用法: python main.py [选项]
+
+选项:
+  --markdown, --md   输出 Markdown 格式（用于 GitHub Actions）
+  --no-push          禁用 Server酱推送
+  --help, -h         显示帮助
+
+环境变量 (Secrets):
+  FRED_API_KEY          FRED 经济数据 (推荐)
+  GEMINI_API_KEY        Google Gemini AI 智能分析
+  GEMINI_MODEL          Gemini 模型名 (默认 gemini-flash-latest)
+  SERPAPI_API_KEYS      SerpAPI 实时新闻搜索
+  TAVILY_API_KEYS       Tavily 搜索 API
+  SERVERCHAN3_SENDKEY   Server酱 手机推送
+  REPORT_TYPE_LABEL     推送标题前缀，如 日报 / 周期
+  UP_COLOR_CONVENTION   涨跌配色: us=绿涨红跌(默认) / cn=红涨绿跌
+"""
 
 
 def main():
@@ -15,21 +34,7 @@ def main():
     no_push = "--no-push" in sys.argv
 
     if "--help" in sys.argv or "-h" in sys.argv:
-        console = Console()
-        console.print("[bold]美股市场监控工具[/]")
-        console.print("用法: python main.py [选项]")
-        console.print()
-        console.print("选项:")
-        console.print("  --markdown, --md   输出 Markdown 格式（用于 GitHub Actions）")
-        console.print("  --no-push          禁用 Server酱推送")
-        console.print("  --help, -h         显示帮助")
-        console.print()
-        console.print("环境变量 (Secrets):")
-        console.print("  FRED_API_KEY          FRED 经济数据 (推荐)")
-        console.print("  GEMINI_API_KEY        Google Gemini AI 智能分析")
-        console.print("  SERPAPI_API_KEYS      SerpAPI 实时新闻搜索")
-        console.print("  TAVILY_API_KEYS       Tavily 搜索 API")
-        console.print("  SERVERCHAN3_SENDKEY   Server酱 手机推送")
+        Console().print(HELP)
         return
 
     try:
@@ -49,64 +54,32 @@ def main():
         analyzer = MarketAnalyzer(fetcher)
         result = analyzer.analyze()
 
+        health = result.get("data_health", {})
+        if health.get("missing_critical"):
+            console.print(f"[bold red]⚠️ 关键数据缺失: "
+                          f"{', '.join(health['missing_critical'])} — 本次不给出操作建议[/]")
+
         # 4. AI summary
         ai_text = generate_ai_summary(result, news_headlines=news_text, console=console)
 
         # 5. Output
+        report = MarkdownReport(result, news_articles=news_articles, ai_summary=ai_text)
+
         if is_markdown:
-            report = MarkdownReport(result, news_articles=news_articles, ai_summary=ai_text)
             md_content = report.render()
             print(md_content)
-
-            # 6. Push notification
-            if not no_push:
-                score = result["risk_score"]
-                level = result["risk_level"]
-                rec = result["recommendation"]
-
-                # Annotate title with position signals
-                pos_tags = []
-                pos_sigs = result.get("position_signals", {})
-                for tname, sig in pos_sigs.items():
-                    al = sig.get("action_level", "")
-                    if al in ("strong_buy", "buy"):
-                        pos_tags.append(f"{tname}加仓")
-                    elif al in ("consider_sell", "sell"):
-                        pos_tags.append(f"{tname}减仓")
-                pos_suffix = " | " + "+".join(pos_tags) if pos_tags else ""
-
-                title = f"📊 美股监控 | 风险{score} {level} | {rec}{pos_suffix}"
-                push_to_serverchan(title, md_content, console=console)
         else:
-            dashboard = Dashboard(result)
-            dashboard.render()
-
+            Dashboard(result).render()
             if ai_text:
-                console.print()
                 from rich.panel import Panel
-                console.print(Panel(ai_text, title="[bold]🤖 AI 智能研判（已结合实时新闻）[/]", border_style="magenta"))
+                console.print()
+                console.print(Panel(ai_text, title="[bold]🤖 AI 智能研判（已结合实时新闻）[/]",
+                                    border_style="magenta"))
+            md_content = report.render()
 
-            # Push in terminal mode too (unless --no-push)
-            if not no_push:
-                report = MarkdownReport(result, news_articles=news_articles, ai_summary=ai_text)
-                md_content = report.render()
-                score = result["risk_score"]
-                level = result["risk_level"]
-                rec = result["recommendation"]
-
-                # Annotate title with position signals
-                pos_tags = []
-                pos_sigs = result.get("position_signals", {})
-                for tname, sig in pos_sigs.items():
-                    al = sig.get("action_level", "")
-                    if al in ("strong_buy", "buy"):
-                        pos_tags.append(f"{tname}加仓")
-                    elif al in ("consider_sell", "sell"):
-                        pos_tags.append(f"{tname}减仓")
-                pos_suffix = " | " + "+".join(pos_tags) if pos_tags else ""
-
-                title = f"📊 美股监控 | 风险{score} {level} | {rec}{pos_suffix}"
-                push_to_serverchan(title, md_content, console=console)
+        # 6. Push notification (same path for both output modes)
+        if not no_push:
+            push_to_serverchan(build_report_title(result), md_content, console=console)
 
     except KeyboardInterrupt:
         print("\n已取消", file=sys.stderr)

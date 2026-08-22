@@ -1,6 +1,28 @@
-import numpy as np
 import pandas as pd
-from config import MA50, MA200, MA250, RSI_PERIOD, LEADING_STOCKS, POSITION_TARGETS
+from config import (MA50, MA200, RSI_PERIOD, LEADING_STOCKS, POSITION_TARGETS,
+                    SIGNAL_LEVELS, TRADING_DAYS_YEAR, CRITICAL_SERIES,
+                    CRITICAL_DERIVED, MACRO_SERIES, threshold)
+
+
+# ======================================================================
+# None-safe comparisons
+#
+# Indicator values are None whenever a feed is missing. Substituting a
+# numeric default (the old `g.get("SPY_MA200") or 0`) silently turned a
+# missing moving average into "price is above its MA", i.e. missing data
+# read as bullish. These helpers make a missing input fail the test instead.
+# ======================================================================
+
+def gt(a, b):
+    return a is not None and b is not None and a > b
+
+
+def lt(a, b):
+    return a is not None and b is not None and a < b
+
+
+def gte(a, b):
+    return a is not None and b is not None and a >= b
 
 
 # ======================================================================
@@ -50,23 +72,42 @@ def pct_above(price, ma):
     return None
 
 
-def check_rsi_divergence(price_series, rsi_series, lookback=20):
-    """Return 'bearish' / 'bullish' / None"""
+def check_rsi_divergence(price_series, rsi_series, lookback=20, recent=5):
+    """Return 'bearish' / 'bullish' / None.
+
+    A divergence means price made a new extreme while RSI failed to confirm it.
+    RSI is therefore sampled *at the prior price extreme* rather than taken as
+    the window's own max/min — comparing against the window's peak RSI would
+    flag almost any new high, since RSI oscillates below its peak most days.
+    """
     if price_series is None or rsi_series is None:
         return None
     if len(price_series) < lookback or len(rsi_series) < lookback:
         return None
+
     p = price_series.iloc[-lookback:]
-    r = rsi_series.iloc[-lookback:]
-    price_now = p.iloc[-1]
+    r = rsi_series.iloc[-lookback:].reindex(p.index)
+    prior_p = p.iloc[:-recent]
+    prior_r = r.iloc[:-recent]
+    if len(prior_p) == 0 or prior_r.isna().all():
+        return None
+
+    price_now = float(p.iloc[-1])
     rsi_now = r.iloc[-1]
-    price_prev_high = p.iloc[:-5].max()
-    rsi_at_prev_high = r.iloc[:-5].max()
-    price_prev_low = p.iloc[:-5].min()
-    rsi_at_prev_low = r.iloc[:-5].min()
-    if price_now >= price_prev_high and rsi_now < rsi_at_prev_high - 2:
+    if pd.isna(rsi_now):
+        return None
+    rsi_now = float(rsi_now)
+
+    high_at = prior_p.idxmax()
+    low_at = prior_p.idxmin()
+    rsi_at_prev_high = prior_r.get(high_at)
+    rsi_at_prev_low = prior_r.get(low_at)
+
+    if (price_now >= float(prior_p.max()) and rsi_at_prev_high is not None
+            and pd.notna(rsi_at_prev_high) and rsi_now < float(rsi_at_prev_high) - 2):
         return "bearish"
-    if price_now <= price_prev_low and rsi_now > rsi_at_prev_low + 2:
+    if (price_now <= float(prior_p.min()) and rsi_at_prev_low is not None
+            and pd.notna(rsi_at_prev_low) and rsi_now > float(rsi_at_prev_low) + 2):
         return "bullish"
     return None
 
@@ -84,10 +125,12 @@ class MarketAnalyzer:
         self.indicators = {}
         self.leader_health = []
         self.combos = []
+        self.data_health = {}
 
     def analyze(self):
         self._gather_indicators()
         self._gather_cycle_indicators()
+        self._check_data_health()
         self._analyze_liquidity()
         self._analyze_sentiment()
         self._analyze_leading()
@@ -108,6 +151,7 @@ class MarketAnalyzer:
             "signals": self.signals,
             "risk_score": self.risk_score,
             "risk_level": risk_level,
+            "danger_count": self.danger_count,
             "market_phase": phase,
             "recommendation": rec,
             "recommendation_detail": rec_detail,
@@ -115,7 +159,44 @@ class MarketAnalyzer:
             "combos": self.combos,
             "economic_cycle": cycle_result,
             "position_signals": position_signals,
+            "data_health": self.data_health,
         }
+
+    # ------------------------------------------------------------------
+    # Data-quality gate
+    #
+    # A run with no data produces no signals, which the net risk score reads
+    # as 0 -> "low risk / hold". That is the most dangerous possible failure
+    # mode: a broken pipeline rendering as reassurance. Detect it explicitly
+    # and let the verdict say "insufficient data" instead.
+    # ------------------------------------------------------------------
+
+    def _check_data_health(self):
+        g = self.indicators
+        missing = [name for name in CRITICAL_SERIES if g.get(name) is None]
+        missing += [name for name in CRITICAL_DERIVED if g.get(name) is None]
+        macro_missing = [name for name in MACRO_SERIES if g.get(name) is None]
+
+        self.data_health = {
+            "ok": not missing,
+            "missing_critical": missing,
+            "missing_macro": macro_missing,
+            "fetch_errors": list(getattr(self.f, "errors", [])),
+        }
+
+    @property
+    def usable(self):
+        return self.data_health.get("ok", True)
+
+    @property
+    def danger_count(self):
+        """Number of active danger-level signals.
+
+        The net risk score can be pushed back to zero by bullish confirmations
+        (up to -65 points of them), so a count that cannot be offset is kept
+        alongside it.
+        """
+        return sum(1 for s in self.signals if s["level"] == "danger")
 
     # ------------------------------------------------------------------
     # Gather all current indicator values
@@ -156,7 +237,6 @@ class MarketAnalyzer:
         g["SOX"] = self.f.get_latest("SOX")
         g["SPY"] = self.f.get_latest("SPY")
         g["QQQ"] = self.f.get_latest("QQQ")
-        g["DIA"] = self.f.get_latest("DIA")
         g["RSP"] = self.f.get_latest("RSP")
 
         market_summary = []
@@ -311,8 +391,10 @@ class MarketAnalyzer:
             elif len(diffs) >= 4 and (diffs < 0).all():
                 self._add_signal("US10Y近期持续回落", -10, "safe", f"当前 {g['US10Y']:.2f}%")
 
-        if g.get("US10Y") is not None and g["US10Y"] > 4.5:
-            self._add_signal("US10Y处于高位", 10, "danger", f"{g['US10Y']:.2f}% > 4.5%")
+        us10y_high = threshold("US10Y")
+        if gt(g.get("US10Y"), us10y_high):
+            self._add_signal("US10Y处于高位", 10, "danger",
+                             f"{g['US10Y']:.2f}% > {us10y_high:.1f}%")
 
         # TIPS
         tips = g.get("TIPS")
@@ -320,29 +402,33 @@ class MarketAnalyzer:
             tips_s = self.f.get_fred_series("TIPS")
             if tips_s is not None and len(tips_s) >= 5:
                 tips_chg = float(tips_s.iloc[-1] - tips_s.iloc[-5])
-                if tips > 2.0 and tips_chg > 0:
+                if tips > threshold("TIPS") and tips_chg > 0:
                     self._add_signal("TIPS实际利率走高", 10, "danger", f"{tips:.2f}% 且近期上升")
-                elif tips_chg < -0.1:
+                elif tips_chg < SIGNAL_LEVELS["TIPS_FALL_DELTA"]:
                     self._add_signal("TIPS实际利率回落", -10, "safe", f"{tips:.2f}%")
 
         # DXY
         dxy = g.get("DXY")
         if dxy is not None:
-            if dxy > 105:
-                self._add_signal("DXY突破105", 10, "danger", f"当前 {dxy:.1f}")
+            dxy_break = threshold("DXY")
+            if dxy > dxy_break:
+                self._add_signal(f"DXY突破{dxy_break:.0f}", 10, "danger", f"当前 {dxy:.1f}")
             dxy_s = self.f.get_series("DXY")
             if dxy_s is not None and len(dxy_s) >= 6:
                 week_chg = (dxy_s.iloc[-1] / dxy_s.iloc[-5] - 1) * 100
-                if week_chg > 2:
+                if week_chg > SIGNAL_LEVELS["DXY_WEEK_SURGE_PCT"]:
                     self._add_signal("DXY单周暴涨", 10, "danger", f"周涨幅 {week_chg:.1f}%")
 
-        # HY OAS
+        # HY OAS (basis points — see FRED_SCALE)
         hy = g.get("HY_OAS")
         if hy is not None:
+            if hy > threshold("HY_OAS"):
+                self._add_signal("HY OAS信用利差处于高位", 10, "danger",
+                                 f"{hy:.0f}bp > {threshold('HY_OAS'):.0f}bp")
             hy_s = self.f.get_fred_series("HY_OAS")
             if hy_s is not None and len(hy_s) >= 6:
                 week_chg = float(hy_s.iloc[-1] - hy_s.iloc[-5])
-                if week_chg > 50:
+                if week_chg > SIGNAL_LEVELS["HY_OAS_WEEK_WIDEN_BP"]:
                     self._add_signal("HY OAS利差急剧走阔", 10, "danger", f"周变化 +{week_chg:.0f}bp")
 
         # M2
@@ -354,7 +440,7 @@ class MarketAnalyzer:
                     recent_trend = float(m2_s.iloc[-1] - m2_s.iloc[-3])
                     if recent_trend > 0:
                         self._add_signal("M2货币供应增速回升", -10, "safe", f"同比 {m2_yoy:.1f}%")
-            elif m2_yoy < -1:
+            elif m2_yoy < SIGNAL_LEVELS["M2_CONTRACT_YOY"]:
                 self._add_signal("M2货币供应萎缩", 5, "warning", f"同比 {m2_yoy:.1f}%")
 
     # ------------------------------------------------------------------
@@ -367,34 +453,36 @@ class MarketAnalyzer:
         vix = g.get("VIX")
         vxn = g.get("VXN")
 
-        if vix is not None and vix > 25:
+        if gt(vix, threshold("VIX")):
             self._add_signal("VIX进入风险区间", 10, "danger", f"VIX={vix:.1f}")
-        if vxn is not None and vxn > 30:
+        if gt(vxn, threshold("VXN")):
             self._add_signal("VXN进入风险区间", 10, "danger", f"VXN={vxn:.1f}")
 
         # VIX term structure
         vt = g.get("VIX_TERM")
-        if vt is not None and vt > 1.0:
+        if gt(vt, threshold("VIX_TERM")):
             self._add_signal("VIX期限结构倒挂", 10, "danger",
                              f"VIX/VIX3M={vt:.2f}，近月恐慌高于远月")
 
         # SKEW
         skew = g.get("SKEW")
         if skew is not None and vix is not None:
-            if skew > 140 and vix < 20:
+            if skew > threshold("SKEW", "warn") and vix < SIGNAL_LEVELS["VIX_CALM_FOR_SKEW"]:
                 self._add_signal("SKEW高+VIX低: 暗流涌动", 5, "warning",
                                  f"SKEW={skew:.0f}, VIX={vix:.1f}")
-            elif skew > 150:
+            elif skew > threshold("SKEW"):
                 self._add_signal("SKEW极端: 尾部风险焦虑", 5, "warning", f"SKEW={skew:.0f}")
 
         # Fear & Greed
         fg = g.get("FEAR_GREED")
         if fg is not None:
-            if fg < 15:
-                self._add_signal("极度恐惧（Fear&Greed<15）", 0, "safe",
+            fear_lvl = SIGNAL_LEVELS["FG_EXTREME_FEAR"]
+            greed_lvl = SIGNAL_LEVELS["FG_GREED"]
+            if fg < fear_lvl:
+                self._add_signal(f"极度恐惧（Fear&Greed<{fear_lvl:.0f}）", 0, "safe",
                                  f"得分={fg:.0f}，可能是黄金坑")
-            elif fg > 85:
-                self._add_signal("极度贪婪（Fear&Greed>85）", 5, "warning",
+            elif fg > greed_lvl:
+                self._add_signal(f"极度贪婪（Fear&Greed>{greed_lvl:.0f}）", 5, "warning",
                                  f"得分={fg:.0f}，注意过热")
 
     # ------------------------------------------------------------------
@@ -428,7 +516,7 @@ class MarketAnalyzer:
                 diff = sox_ret - qqq_ret
                 g["SOX_20D"] = float(sox_ret)
                 g["QQQ_20D"] = float(qqq_ret)
-                if diff < -3:
+                if diff < SIGNAL_LEVELS["SOX_QQQ_DIVERGE_PCT"]:
                     self._add_signal("SOX明显弱于QQQ", 10, "danger",
                                      f"SOX 20日={sox_ret:.1f}%, QQQ={qqq_ret:.1f}%")
 
@@ -438,7 +526,8 @@ class MarketAnalyzer:
             spy_s = self.f.get_series("SPY")
             if spy_s is not None and len(spy_s) >= 20:
                 spy_ret = (spy_s.iloc[-1] / spy_s.iloc[-20] - 1) * 100
-                if spy_ret > 2 and rsp_chg < -1:
+                if (spy_ret > SIGNAL_LEVELS["BREADTH_SPY_RET_PCT"]
+                        and rsp_chg < SIGNAL_LEVELS["BREADTH_RSP_CHG_PCT"]):
                     self._add_signal("市场广度恶化: SPY涨但RSP/SPY比值下降", 10, "danger",
                                      f"RSP/SPY 20日变化={rsp_chg:.1f}%")
                 elif rsp_chg > 0:
@@ -453,9 +542,9 @@ class MarketAnalyzer:
             if xly_s is not None and xlu_s is not None and len(xly_s) >= 20 and len(xlu_s) >= 20:
                 ratio_now = xly_s.iloc[-1] / xlu_s.iloc[-1]
                 ratio_20d = xly_s.iloc[-20] / xlu_s.iloc[-20]
-                if ratio_now < ratio_20d * 0.97:
+                if ratio_now < ratio_20d * SIGNAL_LEVELS["XLY_XLU_DEFENSIVE_RATIO"]:
                     self._add_signal("板块轮动: 资金转向防御", 5, "warning",
-                                     f"XLY/XLU比值下降")
+                                     "XLY/XLU比值下降")
 
     # ------------------------------------------------------------------
     # Macro analysis
@@ -466,10 +555,10 @@ class MarketAnalyzer:
 
         # Sahm Rule
         sahm = g.get("SAHM")
-        if sahm is not None:
-            if sahm >= 0.5:
-                self._add_signal("萨姆规则已触发!", 20, "danger",
-                                 f"当前值={sahm:.2f} >= 0.5，衰退信号")
+        sahm_trigger = threshold("SAHM")
+        if gte(sahm, sahm_trigger):
+            self._add_signal("萨姆规则已触发!", 20, "danger",
+                             f"当前值={sahm:.2f} >= {sahm_trigger:.1f}，衰退信号")
 
         # Yield curve de-inversion
         t10y2y = g.get("T10Y2Y")
@@ -566,7 +655,7 @@ class MarketAnalyzer:
                 "status": status,
             })
 
-        if weak_count >= 3:
+        if weak_count >= SIGNAL_LEVELS["WEAK_LEADERS_COUNT"]:
             self._add_signal(f"多数龙头股走弱（{weak_count}/{len(LEADING_STOCKS)}跌破MA50）",
                              15, "danger", "指数可能补跌")
 
@@ -586,7 +675,10 @@ class MarketAnalyzer:
             vix_up = vix_s.iloc[-1] > vix_s.iloc[-5]
             dxy_chg = (dxy_s.iloc[-1] / dxy_s.iloc[-5] - 1) * 100
             vix_chg = vix_s.iloc[-1] - vix_s.iloc[-5]
-            c1_triggered = dxy_up and vix_up and (dxy_chg > 0.5 or vix_chg > 3)
+            # bool() matters: pandas comparisons yield numpy.bool, which fails
+            # the renderers' `is True` / `is False` identity checks and made
+            # this combo always display as "needs manual observation".
+            c1_triggered = bool(dxy_up and vix_up and (dxy_chg > 0.5 or vix_chg > 3))
             if c1_triggered:
                 self._add_signal("高危组合: DXY+VIX同时上涨", 15, "danger",
                                  f"DXY周涨{dxy_chg:.1f}%, VIX周升{vix_chg:.1f}")
@@ -626,7 +718,9 @@ class MarketAnalyzer:
             tips_s = self.f.get_fred_series("TIPS")
             if tips_s is not None and len(tips_s) >= 5:
                 tips_rising = float(tips_s.iloc[-1]) > float(tips_s.iloc[-5])
-                c4_triggered = tips_rising and tips > 1.8 and vix < 20
+                c4_triggered = (tips_rising
+                                and tips > SIGNAL_LEVELS["TIPS_QUIET_KILL"]
+                                and vix < SIGNAL_LEVELS["VIX_CALM_FOR_TIPS"])
         self.combos.append({
             "name": "TIPS飙升+VIX平稳",
             "triggered": c4_triggered,
@@ -637,7 +731,8 @@ class MarketAnalyzer:
         skew = g.get("SKEW")
         c5_triggered = False
         if skew is not None and vix is not None:
-            c5_triggered = skew > 140 and vix < 18
+            c5_triggered = (skew > SIGNAL_LEVELS["SKEW_QUIET_STORM"]
+                            and vix < SIGNAL_LEVELS["VIX_QUIET_STORM"])
         self.combos.append({
             "name": "VIX低+SKEW高",
             "triggered": c5_triggered,
@@ -656,17 +751,28 @@ class MarketAnalyzer:
     # ------------------------------------------------------------------
 
     def _risk_level(self):
+        if not self.usable:
+            return "数据不足 (无法评级)"
+
         s = self.risk_score
         if s <= 0:
-            return "低风险 (Risk-On)"
+            level = "低风险 (Risk-On)"
         elif s <= 30:
-            return "中低风险"
+            level = "中低风险"
         elif s <= 50:
-            return "中等风险"
+            level = "中等风险"
         elif s <= 70:
-            return "高风险 (Risk-Off)"
+            level = "高风险 (Risk-Off)"
         else:
-            return "极高风险"
+            level = "极高风险"
+
+        # Bullish confirmations carry up to -65 points, enough to net a
+        # genuinely dangerous tape back to "low risk". Surface the raw count
+        # of danger signals so it cannot be scored away.
+        dangers = self.danger_count
+        if dangers >= 3 and s <= 30:
+            level += f"（但有{dangers}项危险信号，勿只看总分）"
+        return level
 
     # ------------------------------------------------------------------
     # Market phase detection
@@ -674,21 +780,27 @@ class MarketAnalyzer:
 
     def _detect_phase(self):
         g = self.indicators
+        if not self.usable:
+            return "数据不足 (无法判断)"
+
         phases = []
 
-        vix = g.get("VIX") or 0
-        dxy = g.get("DXY") or 0
-        sahm = g.get("SAHM") or 0
-        tips = g.get("TIPS") or 0
-        spy = g.get("SPY") or 0
-        spy_ma200 = g.get("SPY_MA200") or 0
+        # Read raw values — no numeric fallbacks. A missing input must fail
+        # its test, not be coerced into one that happens to look bullish.
+        vix = g.get("VIX")
+        dxy = g.get("DXY")
+        sahm = g.get("SAHM")
+        tips = g.get("TIPS")
+        spy = g.get("SPY")
+        spy_ma200 = g.get("SPY_MA200")
+        above_ma200 = gt(spy, spy_ma200)
 
         # Risk-Off
-        if vix > 30 and dxy > 103:
+        if gt(vix, 30) and gt(dxy, threshold("DXY", "warn")):
             phases.append("风险规避 (Risk-Off)")
 
         # Recession
-        if sahm >= 0.5 or any("萨姆规则" in s["name"] for s in self.signals):
+        if gte(sahm, threshold("SAHM")) or any("萨姆规则" in s["name"] for s in self.signals):
             phases.append("衰退交易")
         elif any("解倒挂" in s["name"] for s in self.signals):
             phases.append("衰退交易")
@@ -696,7 +808,7 @@ class MarketAnalyzer:
         # AI/Growth Bull
         sox_strong = any("SOX站稳50日均线" in s["name"] for s in self.signals)
         leaders_ok = sum(1 for lh in self.leader_health if lh["status"] == "safe") >= 4
-        if sox_strong and leaders_ok and spy > spy_ma200:
+        if sox_strong and leaders_ok and above_ma200:
             phases.append("AI成长牛市")
 
         # Liquidity Bull
@@ -704,14 +816,16 @@ class MarketAnalyzer:
         us10y_falling = False
         if us10y_s is not None and len(us10y_s) >= 20:
             us10y_falling = float(us10y_s.iloc[-1]) < float(us10y_s.iloc[-20])
-        if us10y_falling and tips < 1.5 and spy > spy_ma200:
+        if us10y_falling and lt(tips, threshold("TIPS", "warn")) and above_ma200:
             phases.append("流动性牛市")
 
         if not phases:
-            if spy > spy_ma200:
+            if above_ma200:
                 phases.append("标准牛市")
-            else:
+            elif lt(spy, spy_ma200):
                 phases.append("震荡/调整")
+            else:
+                phases.append("趋势未知 (缺少SPY/MA200)")
 
         return " / ".join(phases)
 
@@ -723,39 +837,54 @@ class MarketAnalyzer:
         g = self.indicators
         score = self.risk_score
 
-        vix = g.get("VIX") or 0
-        vxn = g.get("VXN") or 0
-        spy = g.get("SPY") or 0
-        spy_ma200 = g.get("SPY_MA200") or 1
-        qqq = g.get("QQQ") or 0
-        qqq_ma200 = g.get("QQQ_MA200") or 1
-        rsi = g.get("QQQ_RSI") or 50
-        fg = g.get("FEAR_GREED") or 50
-        sahm = g.get("SAHM") or 0
+        if not self.usable:
+            missing = "、".join(self.data_health.get("missing_critical", []))
+            return ("数据不足",
+                    f"关键行情数据缺失（{missing}），本次不给出操作建议。"
+                    "请检查数据源后重跑，不要把空信号当成低风险。")
+
+        # No numeric fallbacks: a missing value leaves its condition False
+        # rather than quietly satisfying or suppressing it.
+        vix = g.get("VIX")
+        vxn = g.get("VXN")
+        spy = g.get("SPY")
+        spy_ma200 = g.get("SPY_MA200")
+        qqq = g.get("QQQ")
+        qqq_ma200 = g.get("QQQ_MA200")
+        rsi = g.get("QQQ_RSI")
+        fg = g.get("FEAR_GREED")
+        sahm = g.get("SAHM")
+        hy = g.get("HY_OAS")
+
+        spy_gap = pct_above(spy, spy_ma200)
 
         # Stage 5: Strong Sell
+        # The former third condition tested for a "PMI" signal that this
+        # codebase never emits, making it permanently false. Credit-spread
+        # stress replaces it — a real systemic-risk confirmation that became
+        # reachable once HY_OAS units were corrected.
         strong_sell_conds = [
             any("解倒挂" in s["name"] for s in self.signals),
-            sahm >= 0.5,
-            any("PMI" in s.get("name", "") and s["level"] == "danger" for s in self.signals),
+            gte(sahm, threshold("SAHM")),
+            gt(hy, threshold("HY_OAS")),
             any("死叉" in s["name"] for s in self.signals),
-            qqq < qqq_ma200,
+            lt(qqq, qqq_ma200),
         ]
         if sum(strong_sell_conds) >= 3:
             return ("强烈卖出", "系统性风险极高，建议减仓至20%以下，可配置TLT对冲")
 
         # Stage 1: Strong Buy
         strong_buy_conds = [
-            vix > 35 or vxn > 40,
-            rsi < 30 or fg < 15,
-            pct_above(spy, spy_ma200) is not None and abs(pct_above(spy, spy_ma200)) < 5,
+            gt(vix, 35) or gt(vxn, 40),
+            lt(rsi, 30) or lt(fg, SIGNAL_LEVELS["FG_EXTREME_FEAR"]),
+            spy_gap is not None and abs(spy_gap) < 5,
             any("US10Y" in s["name"] and "回落" in s["name"] for s in self.signals),
         ]
         if sum(strong_buy_conds) >= 3:
             return ("强烈买入", "极端恐慌+超卖，分批重仓买入（3-5批，间隔1-2周）")
 
         # Stage 2: Gradual Buy
-        if 25 <= vix <= 35 and score < 50:
+        if vix is not None and 25 <= vix <= 35 and score < 50:
             gradual_buy_conds = [
                 any("TIPS" in s["name"] and "回落" in s["name"] for s in self.signals),
                 any("SOX站稳" in s["name"] for s in self.signals),
@@ -767,15 +896,21 @@ class MarketAnalyzer:
         # Stage 4: Gradual Sell
         gradual_sell_conds = [
             any("RSI顶背离" in s["name"] for s in self.signals),
-            fg > 85 if fg else False,
+            gt(fg, SIGNAL_LEVELS["FG_GREED"]),
             any("DXY" in s["name"] and s["level"] == "danger" for s in self.signals),
             any("SOX" in s["name"] and "弱于QQQ" in s["name"] for s in self.signals),
         ]
         if sum(gradual_sell_conds) >= 3:
             return ("逐步减仓", "技术面超买，分批止盈20-30%，停止新买入")
 
-        # Stage 3: Hold
+        # Stage 3: Hold — but a low net score built on top of several danger
+        # signals is not the same as a genuinely quiet tape.
+        dangers = self.danger_count
         if score <= 30:
+            if dangers >= 3:
+                return ("谨慎持有",
+                        f"总分被利好信号对冲至{score}，但仍有{dangers}项危险信号，"
+                        "维持仓位但停止加仓")
             return ("持有观望", "趋势健康，维持现有仓位，享受趋势收益")
         elif score <= 50:
             return ("谨慎持有", "部分风险信号出现，保持警惕，停止加杠杆")
@@ -831,17 +966,17 @@ class MarketAnalyzer:
                         recession_score += 2
                         recession_details.append(f"收益率曲线刚解倒挂 ({t10y2y:.2f}%)")
 
-        # 4. Credit spreads
+        # 4. Credit spreads (basis points — see FRED_SCALE)
         hy = g.get("HY_OAS")
         if hy is not None:
-            if hy < 350:
+            if hy < threshold("HY_OAS", "warn"):
                 expansion_score += 1
                 expansion_details.append(f"信用利差健康 ({hy:.0f}bp)")
-            elif hy > 500:
+            elif hy > threshold("HY_OAS"):
                 recession_score += 1
                 recession_details.append(f"信用利差走阔 ({hy:.0f}bp)")
 
-        # 5. Initial Claims
+        # 5. Initial Claims (thousands — see FRED_SCALE)
         icsa_avg = g.get("ICSA_4W_AVG")
         icsa_trend = g.get("ICSA_TREND")
         if icsa_avg is not None:
@@ -909,23 +1044,27 @@ class MarketAnalyzer:
 
         # Determine inflation level
         cpi_yoy = g.get("CPI_YOY")
-        inflation_high = cpi_yoy is not None and cpi_yoy > 4.0
-        inflation_moderate = cpi_yoy is not None and 2.5 < cpi_yoy <= 4.0
+        cpi_high = SIGNAL_LEVELS["CPI_HIGH_YOY"]
+        cpi_moderate = SIGNAL_LEVELS["CPI_MODERATE_YOY"]
+        inflation_high = gt(cpi_yoy, cpi_high)
         inflation_label = "N/A"
         if cpi_yoy is not None:
-            if cpi_yoy > 4.0:
+            if cpi_yoy > cpi_high:
                 inflation_label = f"高通胀 ({cpi_yoy:.1f}%)"
-            elif cpi_yoy > 2.5:
+            elif cpi_yoy > cpi_moderate:
                 inflation_label = f"温和通胀 ({cpi_yoy:.1f}%)"
             else:
                 inflation_label = f"低通胀 ({cpi_yoy:.1f}%)"
 
+        rec_gate = SIGNAL_LEVELS["RECESSION_SCORE_GATE"]
+        exp_gate = SIGNAL_LEVELS["EXPANSION_SCORE_GATE"]
+
         # Determine cycle phase
-        if recession_score >= 5 and inflation_high:
+        if recession_score >= rec_gate and inflation_high:
             cycle = "stagflation"
             cycle_cn = "滞胀期 (Stagflation)"
             cycle_desc = "经济增长停滞但通胀高企，最难赚钱的阶段"
-        elif recession_score >= 5:
+        elif recession_score >= rec_gate:
             cycle = "recession"
             cycle_cn = "衰退期 (Recession)"
             cycle_desc = "经济收缩，保住本金优先，等待底部抄底机会"
@@ -937,7 +1076,7 @@ class MarketAnalyzer:
             cycle = "late_cycle"
             cycle_cn = "周期末期 (Late Cycle)"
             cycle_desc = "扩张晚期，多项衰退预警出现，逐步转向防御"
-        elif expansion_score >= 7:
+        elif expansion_score >= exp_gate:
             cycle = "expansion"
             cycle_cn = "扩张期 (Expansion)"
             cycle_desc = "经济稳健增长，正常持有风险资产"
@@ -987,30 +1126,30 @@ class MarketAnalyzer:
         results = {}
 
         # --- Layer 1: Macro gate (shared across all targets) ---
-        sahm = g.get("SAHM") or 0
+        sahm = g.get("SAHM")
         fg = g.get("FEAR_GREED")
         hy = g.get("HY_OAS")
-        vix_val = g.get("VIX") or 0
+        vix_val = g.get("VIX")
 
         macro_gate = "正常"
         macro_locked_no_buy = False
         macro_downgrade = False
-        macro_bonus = 0
 
-        if sahm >= 0.5:
+        if gte(sahm, threshold("SAHM")):
             macro_gate = "衰退锁定"
             macro_locked_no_buy = True
-        elif fg is not None and fg > 85:
+        elif gt(fg, SIGNAL_LEVELS["FG_GREED"]):
             macro_gate = "贪婪锁定"
             macro_locked_no_buy = True
 
-        if hy is not None and hy > 500:
+        # Reachable now that HY_OAS is scaled to basis points; on the old
+        # percent-scaled value this gate could never fire.
+        if gt(hy, threshold("HY_OAS")):
             macro_downgrade = True
             if macro_gate == "正常":
                 macro_gate = "信用风险"
 
-        if fg is not None and fg < 20:
-            macro_bonus += 2
+        extreme_fear = lt(fg, SIGNAL_LEVELS["FG_POSITION_FEAR"])
 
         for target_name, cfg in POSITION_TARGETS.items():
             ticker = cfg["ticker"]
@@ -1038,7 +1177,8 @@ class MarketAnalyzer:
             rsi_val = latest(rsi_s)
 
             # 52-week high drawdown
-            high_52w = float(series.iloc[-252:].max()) if len(series) >= 252 else float(series.max())
+            high_52w = (float(series.iloc[-TRADING_DAYS_YEAR:].max())
+                        if len(series) >= TRADING_DAYS_YEAR else float(series.max()))
             drawdown = (price / high_52w - 1) * 100 if high_52w > 0 else 0
 
             # MACD cross detection (last 2 bars)
@@ -1133,18 +1273,15 @@ class MarketAnalyzer:
                 details.append("RSI顶背离(-2)")
 
             # VIX + oversold combo
-            bench_vix = g.get(bench_vix_key) or vix_val
-            if bench_vix > 30 and rsi_val is not None and rsi_val < 35:
+            bench_vix = g.get(bench_vix_key)
+            if bench_vix is None:
+                bench_vix = vix_val
+            if gt(bench_vix, 30) and lt(rsi_val, 35):
                 score += 2
                 details.append(f"{bench_vix_key}={bench_vix:.1f}+RSI超卖 黄金坑(+2)")
 
-            # Fear&Greed + MA200 combo
-            if fg is not None and fg < 20 and pct_ma200 is not None and abs(pct_ma200) < 5:
-                score += 2
-                details.append(f"F&G={fg:.0f} 极恐+MA200支撑(+2)")
-
             # Fear&Greed + RSI overbought combo
-            if fg is not None and fg > 80 and rsi_val is not None and rsi_val > 65:
+            if gt(fg, 80) and gt(rsi_val, 65):
                 score -= 2
                 details.append(f"F&G={fg:.0f}+RSI={rsi_val:.1f} 过热(-2)")
 
@@ -1174,9 +1311,19 @@ class MarketAnalyzer:
             raw_score = score
 
             # --- Layer 1 macro adjustment ---
-            score += macro_bonus
-            if macro_bonus > 0:
-                details.append(f"宏观极恐加权(+{macro_bonus})")
+            # Extreme Fear is worth +2 once. Previously it was paid twice:
+            # a blanket macro bonus plus a separate "extreme fear + MA200
+            # support" combo, so one F&G reading could contribute +4. These
+            # are now exclusive tiers, matching the no-double-counting rule
+            # already applied to the consecutive-down-day scoring above.
+            macro_bonus = 0
+            if extreme_fear:
+                macro_bonus = 2
+                score += macro_bonus
+                if pct_ma200 is not None and abs(pct_ma200) < 5:
+                    details.append(f"F&G={fg:.0f} 极恐+MA200支撑(+2)")
+                else:
+                    details.append(f"F&G={fg:.0f} 宏观极恐加权(+2)")
 
             # --- Layer 3: Score -> action ---
             action, action_level, position_change = self._score_to_action(score)

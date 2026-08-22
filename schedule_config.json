@@ -1,16 +1,14 @@
 {
-  "daily_report": {
-    "enabled": true,
-    "description": "每日市场监控报告 (美股交易策略)",
-    "cron": "30 21 * * 1-5",
-    "cron_description": "UTC 21:30 周一至周五 = 北京时间次日05:30 ≈ 美股收盘后"
+  "_comment": "仅作文档说明，代码不读取此文件。真正生效的定时配置在 .github/workflows/market_monitor.yml 的 cron 字段，修改请以该文件为准。",
+  "active_schedule": {
+    "cron": "7 1 * * 2-6",
+    "cron_description": "UTC 01:07 周二至周六 = 北京时间 09:07 周二至周六",
+    "source": ".github/workflows/market_monitor.yml"
   },
-  "cycle_report": {
-    "enabled": true,
-    "description": "经济周期评估报告 (长期投资策略)",
-    "interval_days": 7,
-    "run_on_weekday": 6,
-    "cron": "0 14 * * 6",
-    "cron_description": "UTC 14:00 每周六 = 北京时间周六22:00，周末复盘"
+  "report_type_rule": {
+    "description": "由 workflow 的 Determine report type 步骤决定",
+    "cycle": "UTC 星期六 (date -u +%u = 6) → 经济周期报告",
+    "daily": "其余日期 → 每日市场监控报告",
+    "manual": "workflow_dispatch 时由 inputs.report_type 指定 (all/daily/cycle)"
   }
 }

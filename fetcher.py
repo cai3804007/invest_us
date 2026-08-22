@@ -3,7 +3,8 @@ import pandas as pd
 import requests
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from config import YAHOO_TICKERS, LEADING_STOCKS, FRED_SERIES, FRED_API_KEY, LOOKBACK_CALENDAR_DAYS, POSITION_TARGETS
+from config import (YAHOO_TICKERS, LEADING_STOCKS, FRED_SERIES, FRED_API_KEY,
+                    FRED_SCALE, LOOKBACK_CALENDAR_DAYS, POSITION_TARGETS)
 
 
 class MarketDataFetcher:
@@ -12,6 +13,7 @@ class MarketDataFetcher:
         self.yahoo_data = {}
         self.fred_data = {}
         self.fear_greed = None
+        self.fear_greed_label = ""
         self._errors = []
 
     def fetch_all(self, console=None):
@@ -22,55 +24,97 @@ class MarketDataFetcher:
         self._fetch_fear_greed(console)
         if console and self._errors:
             for err in self._errors:
-                console.print(f"  [dim]{err}[/]")
+                console.print(f"  [yellow]{err}[/]")
         return self
+
+    @property
+    def errors(self):
+        return list(self._errors)
 
     # ------------------------------------------------------------------
     # Yahoo Finance
     # ------------------------------------------------------------------
 
     def _download_one(self, symbol):
+        """Return (df, error). Never raises — the caller records the reason."""
         try:
             end = datetime.now()
             start = end - timedelta(days=LOOKBACK_CALENDAR_DAYS)
             tk = yf.Ticker(symbol)
             df = tk.history(start=start, end=end, auto_adjust=True)
-            if df is not None and not df.empty:
-                if df.index.tz is not None:
-                    df.index = df.index.tz_localize(None)
-                return df
-        except Exception:
-            pass
-        return pd.DataFrame()
+            if df is None or df.empty:
+                return pd.DataFrame(), "返回空数据"
+            if df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
+            return df, None
+        except Exception as e:
+            # Keep the reason: a silent `pass` here makes Yahoo outages
+            # indistinguishable from a genuinely quiet market.
+            return pd.DataFrame(), f"{type(e).__name__}: {e}"
 
     def _fetch_yahoo(self, console=None):
-        all_items = [(n, s) for n, s in YAHOO_TICKERS.items()]
+        all_items = list(YAHOO_TICKERS.items())
         all_items += [(s, s) for s in LEADING_STOCKS]
-        # Add position-target tickers (e.g. QQQM) that aren't already covered
-        for name, cfg in POSITION_TARGETS.items():
+
+        # Add position-target tickers (e.g. QQQM) that aren't already covered.
+        known_symbols = {sym for _, sym in all_items}
+        for cfg in POSITION_TARGETS.values():
             ticker = cfg["ticker"]
-            if ticker not in dict(all_items).values():
+            if ticker not in known_symbols:
                 all_items.append((ticker, ticker))
+                known_symbols.add(ticker)
 
         if console:
             console.print(f"  [dim]Yahoo Finance: {len(all_items)} 个标的...[/]")
 
         with ThreadPoolExecutor(max_workers=10) as pool:
-            futures = {pool.submit(self._download_one, sym): name for name, sym in all_items}
+            futures = {pool.submit(self._download_one, sym): (name, sym)
+                       for name, sym in all_items}
             for future in as_completed(futures):
-                name = futures[future]
+                name, sym = futures[future]
                 try:
-                    df = future.result()
-                    if not df.empty:
-                        self.yahoo_data[name] = df
-                    else:
-                        self._errors.append(f"Yahoo: {name} 无数据")
+                    df, err = future.result()
                 except Exception as e:
-                    self._errors.append(f"Yahoo: {name} 失败 ({e})")
+                    self._errors.append(f"Yahoo: {name} ({sym}) 失败 ({e})")
+                    continue
+                if not df.empty:
+                    self.yahoo_data[name] = df
+                else:
+                    self._errors.append(f"Yahoo: {name} ({sym}) 无数据 — {err}")
 
     # ------------------------------------------------------------------
     # FRED
     # ------------------------------------------------------------------
+
+    def _fetch_one_fred(self, series_id, start_str, end_str):
+        """Return (df, error). Values are left in FRED's native unit here;
+        scaling happens in _fetch_fred so the mapping stays in one place."""
+        try:
+            resp = requests.get(
+                "https://api.stlouisfed.org/fred/series/observations",
+                params={
+                    "series_id": series_id,
+                    "api_key": FRED_API_KEY,
+                    "file_type": "json",
+                    "observation_start": start_str,
+                    "observation_end": end_str,
+                    "sort_order": "asc",
+                },
+                timeout=15,
+            )
+            data = resp.json()
+            if "observations" not in data:
+                detail = data.get("error_message", f"HTTP {resp.status_code}")
+                return None, str(detail)
+            rows = [{"date": o["date"], "value": float(o["value"])}
+                    for o in data["observations"] if o["value"] != "."]
+            if not rows:
+                return None, "无有效观测值"
+            df = pd.DataFrame(rows)
+            df["date"] = pd.to_datetime(df["date"])
+            return df.set_index("date").sort_index(), None
+        except Exception as e:
+            return None, f"{type(e).__name__}: {e}"
 
     def _fetch_fred(self, console=None):
         if not FRED_API_KEY:
@@ -86,31 +130,25 @@ class MarketDataFetcher:
         end_str = datetime.now().strftime("%Y-%m-%d")
         start_str = (datetime.now() - timedelta(days=LOOKBACK_CALENDAR_DAYS)).strftime("%Y-%m-%d")
 
-        for name, series_id in FRED_SERIES.items():
-            try:
-                url = "https://api.stlouisfed.org/fred/series/observations"
-                params = {
-                    "series_id": series_id,
-                    "api_key": FRED_API_KEY,
-                    "file_type": "json",
-                    "observation_start": start_str,
-                    "observation_end": end_str,
-                    "sort_order": "asc",
-                }
-                resp = requests.get(url, params=params, timeout=15)
-                data = resp.json()
-                if "observations" in data:
-                    rows = []
-                    for o in data["observations"]:
-                        if o["value"] != ".":
-                            rows.append({"date": o["date"], "value": float(o["value"])})
-                    if rows:
-                        df = pd.DataFrame(rows)
-                        df["date"] = pd.to_datetime(df["date"])
-                        df = df.set_index("date").sort_index()
-                        self.fred_data[name] = df
-            except Exception as e:
-                self._errors.append(f"FRED: {name} 失败 ({e})")
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = {
+                pool.submit(self._fetch_one_fred, series_id, start_str, end_str): name
+                for name, series_id in FRED_SERIES.items()
+            }
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    df, err = future.result()
+                except Exception as e:
+                    self._errors.append(f"FRED: {name} 失败 ({e})")
+                    continue
+                if df is None:
+                    self._errors.append(f"FRED: {name} 失败 ({err})")
+                    continue
+                scale = FRED_SCALE.get(name)
+                if scale is not None:
+                    df["value"] = df["value"] * scale
+                self.fred_data[name] = df
 
     # ------------------------------------------------------------------
     # CNN Fear & Greed
@@ -127,10 +165,12 @@ class MarketDataFetcher:
             if "fear_and_greed" in data:
                 self.fear_greed = data["fear_and_greed"].get("score")
                 self.fear_greed_label = data["fear_and_greed"].get("rating", "")
-        except Exception:
+            else:
+                self._errors.append(f"CNN Fear & Greed: 响应缺少 fear_and_greed 字段 (HTTP {resp.status_code})")
+        except Exception as e:
             self.fear_greed = None
             self.fear_greed_label = ""
-            self._errors.append("CNN Fear & Greed 获取失败")
+            self._errors.append(f"CNN Fear & Greed 获取失败 ({type(e).__name__}: {e})")
 
     # ------------------------------------------------------------------
     # Helper accessors

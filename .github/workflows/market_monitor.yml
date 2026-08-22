@@ -82,18 +82,19 @@ jobs:
           cat report.md >> "$GITHUB_STEP_SUMMARY"
           cat run.log >&2
 
+      # Pushing separately (rather than letting main.py do it) so the phone
+      # still gets a notification when the analysis step itself fails.
+      # The title logic lives in notifier.push_markdown_file — not inlined here.
       - name: Push to phone
         if: always()
+        env:
+          REPORT_TYPE: ${{ steps.report_type.outputs.type }}
         run: |
           python -c "
-          from notifier import push_to_serverchan
-          report_type = '${{ steps.report_type.outputs.type }}'
-          type_label = {'daily': '日报', 'cycle': '周期', 'all': '综合'}.get(report_type, '')
-          title = open('report.md').read().split('\n')[0].replace('# ', '')
-          if type_label:
-              title = f'[{type_label}] {title}'
-          content = open('report.md').read()
-          push_to_serverchan(title, content)
+          import os
+          from notifier import push_markdown_file
+          label = {'daily': '日报', 'cycle': '周期', 'all': '综合'}.get(os.environ.get('REPORT_TYPE',''), '')
+          push_markdown_file('report.md', type_label=label)
           " 2>&1 || echo "Push failed, continuing..."
 
       - name: Upload report

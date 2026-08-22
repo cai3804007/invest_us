@@ -1,6 +1,6 @@
 import json
 import requests
-from config import GEMINI_API_KEY
+from config import GEMINI_API_KEY, GEMINI_MODEL, ASSET_CLASSES, ASSET_LABELS
 
 
 SYSTEM_PROMPT = """你是一位资深的美股分析师和长期投资顾问。根据以下市场数据、经济周期判断、活跃信号和实时新闻，给出简洁的市场研判。
@@ -38,7 +38,7 @@ def generate_ai_summary(analysis_result, news_headlines="", console=None):
 
     try:
         url = (f"https://generativelanguage.googleapis.com/v1beta/"
-               f"models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}")
+               f"models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}")
 
         payload = {
             "contents": [{
@@ -59,13 +59,22 @@ def generate_ai_summary(analysis_result, news_headlines="", console=None):
             if parts:
                 return parts[0].get("text", "")
 
+        # A failure here used to print one dim line and drop the whole AI
+        # section from the report — indistinguishable from "AI disabled".
+        # Report it at warning level with the API's own message.
         if console:
-            console.print(f"  [dim]Gemini 返回无内容: {json.dumps(result, ensure_ascii=False)[:200]}[/]")
+            err = result.get("error", {})
+            msg = err.get("message") or json.dumps(result, ensure_ascii=False)[:200]
+            console.print(f"  [yellow]Gemini AI 失败 (HTTP {resp.status_code}, model={GEMINI_MODEL}): {msg}[/]")
+            if err.get("status") == "PERMISSION_DENIED":
+                console.print("  [yellow]→ 该 API key 所属项目被拒绝访问，需要在 Google AI Studio 侧处理，"
+                              "换模型无效[/]")
         return ""
 
     except Exception as e:
         if console:
-            console.print(f"  [dim]Gemini AI 分析失败: {e}[/]")
+            console.print(f"  [yellow]Gemini AI 分析异常 (model={GEMINI_MODEL}): "
+                          f"{type(e).__name__}: {e}[/]")
         return ""
 
 
@@ -74,8 +83,16 @@ def _build_data_summary(r):
     lines = []
 
     lines.append(f"风险评分: {r['risk_score']}  风险等级: {r['risk_level']}")
+    lines.append(f"危险信号数: {r.get('danger_count', 0)}")
     lines.append(f"市场阶段: {r['market_phase']}")
     lines.append(f"操作建议: {r['recommendation']}")
+
+    health = r.get("data_health") or {}
+    if health.get("missing_critical"):
+        lines.append(f"⚠️ 关键数据缺失: {', '.join(health['missing_critical'])}"
+                     " —— 以下指标不完整，请勿据此给出确定结论")
+    elif health.get("missing_macro"):
+        lines.append(f"注意: 宏观数据缺失 ({', '.join(health['missing_macro'])})")
     lines.append("")
 
     def _v(key, label, suffix=""):
@@ -87,18 +104,19 @@ def _build_data_summary(r):
     lines.append(_v("US2Y", "US2Y", "%"))
     lines.append(_v("TIPS", "TIPS实际利率", "%"))
     lines.append(_v("T10Y2Y", "10Y-2Y利差", "%"))
-    lines.append(f"DXY: {g.get('DXY', 'N/A')}")
+    lines.append(_v("DXY", "DXY"))
     lines.append(_v("HY_OAS", "HY OAS", "bp"))
     lines.append(_v("M2_YOY", "M2同比增速", "%"))
     lines.append("")
 
     lines.append("--- 情绪 ---")
-    lines.append(f"VIX: {g.get('VIX', 'N/A')}")
-    lines.append(f"VXN: {g.get('VXN', 'N/A')}")
+    lines.append(_v("VIX", "VIX"))
+    lines.append(_v("VXN", "VXN"))
     vt = g.get("VIX_TERM")
-    lines.append(f"VIX期限结构: {'倒挂' if vt and vt > 1 else '正常'} ({vt:.2f})" if vt else "VIX期限结构: N/A")
-    lines.append(f"SKEW: {g.get('SKEW', 'N/A')}")
-    lines.append(f"恐惧贪婪指数: {g.get('FEAR_GREED', 'N/A')}")
+    lines.append(f"VIX期限结构: {'倒挂' if vt > 1 else '正常'} ({vt:.2f})"
+                 if vt is not None else "VIX期限结构: N/A")
+    lines.append(_v("SKEW", "SKEW"))
+    lines.append(_v("FEAR_GREED", "恐惧贪婪指数"))
     lines.append("")
 
     lines.append("--- 技术面 ---")
@@ -141,10 +159,8 @@ def _build_data_summary(r):
         lines.append(f"衰退信号: {cycle['recession_score']}/10 ({', '.join(cycle['recession_details'][:5])})")
         lines.append("")
         lines.append("--- 推荐资产配置 ---")
-        labels = {"stocks": "股票", "long_bonds": "长期国债", "cash": "现金/短债",
-                  "gold": "黄金", "tips": "TIPS", "commodities": "大宗商品"}
-        for key in ["stocks", "long_bonds", "cash", "gold", "tips", "commodities"]:
+        for key in ASSET_CLASSES:
             weight, detail = cycle["allocation"][key]
-            lines.append(f"{labels[key]}: {weight} ({detail})")
+            lines.append(f"{ASSET_LABELS[key]}: {weight} ({detail})")
 
     return "\n".join(lines)
