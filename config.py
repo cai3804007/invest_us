@@ -47,6 +47,28 @@ FRED_SERIES = {
     "ICSA": "ICSA",
     "CPI": "CPIAUCSL",
     "PAYEMS": "PAYEMS",
+    # Real GDP level — YoY is derived from this to match the spec's "GDP同比".
+    "GDP": "GDPC1",
+    # Fed policy: target upper bound. Dovishness is inferred from cuts and
+    # from US2Y trading below the target (i.e. the market pricing cuts).
+    "FED_UPPER": "DFEDTARU",
+    # ISM manufacturing PMI was withdrawn from FRED (series NAPM no longer
+    # exists). These three regional Fed manufacturing surveys are averaged
+    # into a PMI proxy — see PMI_PROXY_SERIES / PMI_LEVELS.
+    "PMI_NY": "GACDISA066MSFRBNY",
+    "PMI_PHI": "GACDFSA066MSFRBPHI",
+    "PMI_DAL": "BACTSAMFRBDAL",
+}
+
+# Averaged into one diffusion index. NOTE: these are diffusion indices centred
+# on 0, not the 50-centred ISM scale. No conversion is applied — inventing a
+# regression to fake "PMI = 47.3" would be false precision. Thresholds below
+# are stated on the native scale, with the ISM equivalent noted for reading.
+PMI_PROXY_SERIES = ["PMI_NY", "PMI_PHI", "PMI_DAL"]
+
+PMI_LEVELS = {
+    "CONTRACTION": 0.0,     # 0 = 荣枯线, 对应 ISM PMI 50
+    "DEEP": -20.0,          # 深度收缩, 大致对应 ISM PMI 45 以下
 }
 
 # ------------------------------------------------------------------
@@ -66,11 +88,18 @@ FRED_SCALE = {
     "ICSA": 0.001,
 }
 
-LOOKBACK_CALENDAR_DAYS = 500
+# ~3 years. Needs to cover MA250 with history to spare, plus the 50-week
+# moving average used for the weekly death cross (spec 阶段5).
+LOOKBACK_CALENDAR_DAYS = 1100
 MA50 = 50
 MA200 = 200
+MA250 = 250
 RSI_PERIOD = 14
 TRADING_DAYS_YEAR = 252
+
+# Weekly moving averages for the spec's 周线死叉 (21周线跌破50周线).
+MA_WEEKS_FAST = 21
+MA_WEEKS_SLOW = 50
 
 # ------------------------------------------------------------------
 # Data-quality gate
@@ -122,6 +151,8 @@ THRESHOLDS = {
     "FEAR_GREED": ("two_sided", (20.0, 80.0), (15.0, 85.0)),
     "SPY_RSI": ("two_sided", (30.0, 70.0), (20.0, 80.0)),
     "QQQ_RSI": ("two_sided", (30.0, 70.0), (20.0, 80.0)),
+    "PMI_PROXY": ("low_bad", 0.0, -20.0),      # 0 = 荣枯线
+    "GDP_YOY": ("low_bad", 2.0, 0.0),
 }
 
 
@@ -181,8 +212,8 @@ SIGNAL_LEVELS = {
     "BREADTH_RSP_CHG_PCT": -1.0,
     "XLY_XLU_DEFENSIVE_RATIO": 0.97,
     "WEAK_LEADERS_COUNT": 3,
-    "RECESSION_SCORE_GATE": 5,
-    "EXPANSION_SCORE_GATE": 7,
+    "LEADER_VOLUME_SPIKE": 1.5,   # 放量: 成交量 >= 50日均量的 1.5 倍
+    "FED_DOVISH_GAP": -0.5,       # US2Y 低于政策利率 50bp 以上 = 市场抢跑降息
     "CPI_HIGH_YOY": 4.0,
     "CPI_MODERATE_YOY": 2.5,
 }
@@ -271,3 +302,154 @@ CYCLE_REFERENCE = [
      "信号混合，扩张与衰退指标共存，方向不明",
      "均衡配置", "避免集中持仓"),
 ]
+
+
+# ==================================================================
+# Signal registry
+#
+# Every scored signal is declared here with a stable id. Three problems this
+# solves:
+#
+#   1. Decision logic used to match signals by Chinese substring
+#      (`"解倒挂" in s["name"]`). Renaming a signal silently disabled the
+#      condition that depended on it — exactly how the PMI condition in
+#      阶段5 died unnoticed. Conditions now match on id.
+#   2. The risk bands were calibrated against the strategy document's
+#      ±200/±110 scale, but the implementation drifted to +260/-65. With
+#      every weight declared in one table, the attainable range is computed
+#      rather than assumed, and the bands scale with it.
+#   3. Several document rows are "A 或 B" (one score for either condition),
+#      e.g. 「VIX > 25 或 VXN > 30 +10」. The code fired both and scored +20.
+#      `group` marks those rows: at most one signal per group may fire, and
+#      the attainable maximum counts the group once.
+#
+# Fields: score, level, name, source, group
+#   source "spec" = listed in 《美股综合交易策略》四、风险评分系统
+#          "ext"  = extension not in that table (kept, but visible as such)
+# ==================================================================
+def _sig(score, level, name, source, group=None):
+    return {"score": score, "level": level, "name": name,
+            "source": source, "group": group}
+
+
+SIGNALS = {
+    # --- 流动性 ---
+    # spec row: 「US10Y连续5日上涨或突破关键位 +10」 -> one score, either way
+    "US10Y_STREAK_UP":    _sig(10,  "danger",  "US10Y连续5日上涨", "spec", "US10Y_RISK"),
+    "US10Y_HIGH":         _sig(10,  "danger",  "US10Y处于高位", "spec", "US10Y_RISK"),
+    "US10Y_FALLING":      _sig(-10, "safe",    "US10Y近期持续回落", "spec"),
+    "TIPS_RISING":        _sig(10,  "danger",  "TIPS实际利率走高", "spec"),
+    "TIPS_FALLING":       _sig(-10, "safe",    "TIPS实际利率回落", "spec"),
+    # spec row: 「DXY上涨且 > 105 +10」 -> level and weekly surge share one score
+    "DXY_BREAKOUT":       _sig(10,  "danger",  "DXY突破关键位", "spec", "DXY_RISK"),
+    "DXY_WEEK_SURGE":     _sig(10,  "danger",  "DXY单周暴涨", "spec", "DXY_RISK"),
+    "HY_OAS_WIDENING":    _sig(10,  "danger",  "HY OAS利差急剧走阔", "spec"),
+    "HY_OAS_HIGH":        _sig(10,  "danger",  "HY OAS信用利差处于高位", "ext"),
+    "M2_REBOUND":         _sig(-10, "safe",    "M2货币供应增速回升", "spec"),
+    "M2_CONTRACTING":     _sig(5,   "warning", "M2货币供应萎缩", "ext"),
+    "FED_DOVISH":         _sig(-15, "safe",    "美联储转鸽/降息预期升温", "spec"),
+
+    # --- 情绪 ---
+    # spec row: 「VIX > 25 或 VXN > 30 +10」 -> one score for either
+    "VIX_RISK":           _sig(10,  "danger",  "VIX进入风险区间", "spec", "VOL_RISK"),
+    "VXN_RISK":           _sig(10,  "danger",  "VXN进入风险区间", "spec", "VOL_RISK"),
+    "VIX_TERM_INVERTED":  _sig(10,  "danger",  "VIX期限结构倒挂", "spec"),
+    "SKEW_HIGH_VIX_LOW":  _sig(5,   "warning", "SKEW高+VIX低: 暗流涌动", "spec", "SKEW_RISK"),
+    "SKEW_EXTREME":       _sig(5,   "warning", "SKEW极端: 尾部风险焦虑", "ext", "SKEW_RISK"),
+    "EXTREME_FEAR":       _sig(0,   "safe",    "极度恐惧", "ext"),
+    "EXTREME_GREED":      _sig(5,   "warning", "极度贪婪", "ext"),
+
+    # --- 领先指标 ---
+    "SOX_BELOW_MA50":     _sig(15,  "danger",  "SOX跌破50日均线", "spec"),
+    "SOX_ABOVE_MA50":     _sig(-10, "safe",    "SOX站稳50日均线上方", "spec"),
+    "SOX_WEAKER_QQQ":     _sig(10,  "danger",  "SOX明显弱于QQQ", "spec"),
+    "BREADTH_BAD":        _sig(10,  "danger",  "市场广度恶化", "spec"),
+    "BREADTH_GOOD":       _sig(-10, "safe",    "市场广度健康", "spec"),
+    "SECTOR_DEFENSIVE":   _sig(5,   "warning", "板块轮动: 资金转向防御", "ext"),
+    "LEADERS_WEAK":       _sig(15,  "danger",  "多数龙头股走弱", "spec"),
+
+    # --- 宏观 ---
+    "SAHM_TRIGGERED":     _sig(20,  "danger",  "萨姆规则已触发!", "spec"),
+    "CURVE_UNINVERT":     _sig(15,  "danger",  "收益率曲线刚解倒挂!", "spec"),
+    "PMI_CONTRACTING":    _sig(10,  "danger",  "制造业景气跌破荣枯线且下行", "spec"),
+    "PMI_TROUGH_UP":      _sig(-15, "safe",    "制造业景气见底拐头向上", "spec"),
+
+    # --- 技术面 ---
+    "SPY_BELOW_MA200":    _sig(10,  "danger",  "SPY跌破200日均线", "ext"),
+    "QQQ_BELOW_MA200":    _sig(10,  "danger",  "QQQ跌破200日均线", "ext"),
+    "SPY_GOLDEN_CROSS":   _sig(-10, "safe",    "SPY金叉（MA50上穿MA200）", "ext"),
+    "SPY_DEATH_CROSS":    _sig(10,  "danger",  "SPY死叉（MA50下穿MA200）", "ext"),
+    "RSI_BEAR_DIV":       _sig(5,   "warning", "QQQ出现RSI顶背离", "spec"),
+    "RSI_BULL_DIV":       _sig(-5,  "safe",    "QQQ出现RSI底背离", "ext"),
+
+    # --- 组合 ---
+    "COMBO_DXY_VIX":      _sig(15,  "danger",  "高危组合: DXY+VIX同时上涨", "spec"),
+}
+
+
+def signal_meta(signal_id):
+    try:
+        return SIGNALS[signal_id]
+    except KeyError:
+        raise KeyError(f"unknown signal id: {signal_id!r}") from None
+
+
+def _score_span(source=None):
+    """Maximum attainable positive / negative total, counting each exclusivity
+    group only once (its largest member)."""
+    items = [v for v in SIGNALS.values() if source is None or v["source"] == source]
+    pos = sum(v["score"] for v in items if v["score"] > 0 and not v["group"])
+    neg = sum(v["score"] for v in items if v["score"] < 0 and not v["group"])
+    groups = {}
+    for v in items:
+        if v["group"]:
+            groups.setdefault(v["group"], []).append(v["score"])
+    for scores in groups.values():
+        hi, lo = max(scores), min(scores)
+        if hi > 0:
+            pos += hi
+        if lo < 0:
+            neg += lo
+    return pos, neg
+
+
+MAX_RISK_POSITIVE, MAX_RISK_NEGATIVE = _score_span()
+SPEC_RISK_POSITIVE, SPEC_RISK_NEGATIVE = _score_span("spec")
+
+# The document's bands (≤0 / 30 / 50 / 70) sit at these fractions of its own
+# +200 ceiling. Holding the fractions fixed keeps the calibration intact as
+# signals are added or removed.
+RISK_BAND_FRACTIONS = [0.15, 0.25, 0.35]
+
+RISK_BANDS = [round(f * MAX_RISK_POSITIVE) for f in RISK_BAND_FRACTIONS]
+
+# ------------------------------------------------------------------
+# Economic-cycle scoring — thresholds and gates from
+# 《经济周期长期投资策略》三、3.3 周期识别综合评分卡
+# ------------------------------------------------------------------
+CYCLE_LEVELS = {
+    "UNRATE_LOW": 6.0,          # spec: 失业率低于6%且下降趋势
+    "GDP_YOY_STRONG": 2.0,      # spec: GDP同比增速 > 2%
+    "PAYEMS_STRONG": 150.0,     # spec: 非农每月 > 15万
+    "PAYEMS_WEAK": 50.0,
+    "CURVE_NORMAL": 0.5,        # spec: 收益率曲线利差 > 0.5%
+    "HY_OAS_HEALTHY": 400.0,    # spec: 信用利差 < 400bp
+    "HY_OAS_STRESS": 500.0,     # spec: 信用利差 > 500bp 且走阔
+    "ICSA_LOW": 250.0,          # spec: 初次申请失业金 < 25万
+    "ICSA_HIGH": 300.0,         # spec: 4周均值 > 30万且上升
+    "SAHM_SAFE": 0.3,
+}
+
+# spec 判断规则: 扩张≥7 且 衰退≤2 -> 扩张期
+#                扩张≤3 且 衰退≥6 -> 衰退期
+#                其余             -> 过渡期
+CYCLE_GATES = {
+    "EXPANSION_MIN": 7,
+    "EXPANSION_MAX_RECESSION": 2,
+    "RECESSION_MIN": 6,
+    "RECESSION_MAX_EXPANSION": 3,
+    # Middle band, used to place the extra phases the allocation table needs
+    # (周期末期 / 滞胀前期) inside the spec's 过渡期 zone.
+    "MID_RECESSION_MIN": 4,
+    "MID_EXPANSION_MAX": 4,
+}

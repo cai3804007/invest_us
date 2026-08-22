@@ -1,6 +1,7 @@
 import json
 import requests
-from config import GEMINI_API_KEY, GEMINI_MODEL, ASSET_CLASSES, ASSET_LABELS
+from config import (GEMINI_API_KEY, GEMINI_MODEL, ASSET_CLASSES,
+                    ASSET_LABELS, MAX_RISK_POSITIVE)
 
 
 SYSTEM_PROMPT = """你是一位资深的美股分析师和长期投资顾问。根据以下市场数据、经济周期判断、活跃信号和实时新闻，给出简洁的市场研判。
@@ -82,7 +83,7 @@ def _build_data_summary(r):
     g = r["indicators"]
     lines = []
 
-    lines.append(f"风险评分: {r['risk_score']}  风险等级: {r['risk_level']}")
+    lines.append(f"风险评分: {r['risk_score']}/{MAX_RISK_POSITIVE}  风险等级: {r['risk_level']}")
     lines.append(f"危险信号数: {r.get('danger_count', 0)}")
     lines.append(f"市场阶段: {r['market_phase']}")
     lines.append(f"操作建议: {r['recommendation']}")
@@ -119,12 +120,35 @@ def _build_data_summary(r):
     lines.append(_v("FEAR_GREED", "恐惧贪婪指数"))
     lines.append("")
 
+    lines.append("--- 宏观 ---")
+    pmi = g.get("PMI_PROXY")
+    if pmi is not None:
+        trend = {"rising": "上升", "falling": "下降"}.get(g.get("PMI_TREND"), "持平")
+        lines.append(f"制造业景气(地区联储均值, 0=荣枯线): {pmi:+.1f} ({trend})")
+    else:
+        lines.append("制造业景气: N/A")
+    lines.append(_v("GDP_YOY", "GDP同比", "%"))
+    lines.append(_v("SAHM", "萨姆规则"))
+    lines.append(_v("UNRATE", "失业率", "%"))
+    fed = g.get("FED_UPPER")
+    gap = g.get("FED_MARKET_GAP")
+    if fed is not None:
+        note = f"，US2Y差 {gap:+.2f}%" if gap is not None else ""
+        lines.append(f"联邦基金上限: {fed:.2f}%{note}")
+    lines.append("")
+
     lines.append("--- 技术面 ---")
     lines.append(_v("SPY_VS_MA200", "SPY vs MA200", "%"))
     lines.append(_v("QQQ_VS_MA200", "QQQ vs MA200", "%"))
     lines.append(_v("SPY_RSI", "SPY RSI"))
     lines.append(_v("QQQ_RSI", "QQQ RSI"))
     lines.append(f"MACD: {'多头' if g.get('SPY_MACD_BULL') else '空头'}")
+    wk = g.get("SPY_WEEKLY_CROSS")
+    f21, f50 = g.get("SPY_MA21W"), g.get("SPY_MA50W")
+    if f21 is not None and f50 is not None:
+        state = "多头排列" if f21 > f50 else "空头排列"
+        tag = {"death": " 本周死叉!", "golden": " 本周金叉"}.get(wk, "")
+        lines.append(f"SPY周线21/50: {state} ({f21:.0f}/{f50:.0f}){tag}")
     lines.append("")
 
     if r.get("signals"):

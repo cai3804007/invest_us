@@ -7,7 +7,7 @@ from rich.columns import Columns
 
 from config import (grade, ASSET_CLASSES, ASSET_LABELS, ASSET_EMOJI,
                     CYCLE_EMOJI, CYCLE_STYLES, CYCLE_REFERENCE,
-                    UP_COLOR_CONVENTION)
+                    UP_COLOR_CONVENTION, RISK_BANDS, MAX_RISK_POSITIVE)
 
 
 def _status_icon(level):
@@ -118,10 +118,47 @@ def _fmt_macd(g):
     return "多头" if g.get("SPY_MACD_BULL") else "空头"
 
 
+def _fmt_pmi(g):
+    v = g.get("PMI_PROXY")
+    if v is None:
+        return None
+    n = g.get("PMI_PROXY_SOURCES") or 0
+    trend = {"rising": "上升", "falling": "下降"}.get(g.get("PMI_TREND"), "—")
+    return f"{v:+.1f} ({trend}, {n}源均值)"
+
+
+def _fmt_weekly_cross(g):
+    fast, slow = g.get("SPY_MA21W"), g.get("SPY_MA50W")
+    if fast is None or slow is None:
+        return None
+    cross = g.get("SPY_WEEKLY_CROSS")
+    tag = {"death": "本周死叉!", "golden": "本周金叉"}.get(cross)
+    state = "多头排列" if fast > slow else "空头排列"
+    return f"{state} ({fast:.0f}/{slow:.0f})" + (f" {tag}" if tag else "")
+
+
+def _fmt_fed(g):
+    upper = g.get("FED_UPPER")
+    if upper is None:
+        return None
+    gap = g.get("FED_MARKET_GAP")
+    if gap is None:
+        return f"{upper:.2f}%"
+    lean = "市场抢跑降息" if gap < -0.25 else "市场预期加息" if gap > 0.25 else "预期中性"
+    return f"{upper:.2f}% (US2Y差 {gap:+.2f}%, {lean})"
+
+
 # Indicators whose status is not a simple threshold comparison.
 GRADE_OVERRIDES = {
     "SPY_MACD_BULL": lambda g: "safe" if g.get("SPY_MACD_BULL") else "danger",
     "CURVE": lambda g: grade("T10Y2Y", g.get("T10Y2Y")),
+    "SPY_WEEKLY_CROSS": lambda g: (
+        "danger" if g.get("SPY_WEEKLY_CROSS") == "death"
+        else None if g.get("SPY_MA21W") is None
+        else "safe" if g.get("SPY_MA21W") > g.get("SPY_MA50W") else "warning"),
+    # Informational: US2Y below the policy rate is a liquidity tailwind,
+    # above it simply means no cuts are priced — not a risk in itself.
+    "FED_UPPER": lambda g: (None if g.get("FED_UPPER") is None else "safe"),
 }
 
 
@@ -178,6 +215,12 @@ INDICATOR_GROUPS = [
          "见顶回落=复苏 / 持续上升=衰退风险"),
         ("CURVE", "收益率曲线", 2, "", _fmt_curve,
          "倒挂预示衰退，解倒挂是最危险的信号"),
+        ("PMI_PROXY", "制造业景气", 1, "", _fmt_pmi,
+         "地区联储制造业调查均值，**0=荣枯线(对应ISM PMI 50)** / <-20 深度收缩"),
+        ("GDP_YOY", "GDP同比", 1, "%", None,
+         ">2% 稳健扩张 / <0% 衰退"),
+        ("FED_UPPER", "联邦基金上限", 2, "%", _fmt_fed,
+         "US2Y 低于政策利率=市场抢跑降息(利好流动性)"),
     ]),
     ("第五层: 技术面", "📉 技术面", [
         ("SPY_VS_MA200", "SPY vs MA200", 1, "%", None,
@@ -190,6 +233,8 @@ INDICATOR_GROUPS = [
          "<30 超卖 / >70 超买，背离比绝对值更重要"),
         ("SPY_MACD_BULL", "SPY MACD", 0, "", _fmt_macd,
          "多头=趋势向上 / 空头=趋势向下"),
+        ("SPY_WEEKLY_CROSS", "SPY周线21/50", 0, "", _fmt_weekly_cross,
+         "**周线死叉=系统性撤退信号**(阶段5条件)，比日线死叉可靠"),
     ]),
 ]
 
@@ -298,11 +343,12 @@ class Dashboard:
         level = self.r["risk_level"]
         dangers = self.r.get("danger_count", 0)
 
+        b1, b2, _ = RISK_BANDS
         if "数据不足" in level:
             style, border = "bold white on red", "red"
-        elif score <= 30:
+        elif score <= b1:
             style, border = "bold green", "green"
-        elif score <= 50:
+        elif score <= b2:
             style, border = "bold yellow", "yellow"
         else:
             style, border = "bold red", "red"
@@ -315,6 +361,8 @@ class Dashboard:
         content.append("    危险信号: ", style="bold")
         content.append(f"{dangers} 项", style="bold red" if dangers >= 3 else "dim")
         content.append(f"\n市场阶段: {self.r['market_phase']}", style="cyan")
+        content.append(f"\n[评分区间 0~{MAX_RISK_POSITIVE}，档位 {b1}/{b2}/{RISK_BANDS[2]}]",
+                       style="dim")
 
         self.console.print(Panel(content, title="[bold]🎯 综合评估[/]", border_style=border))
 
@@ -494,14 +542,19 @@ class Dashboard:
         t.add_column("vs MA50", justify="right", min_width=8)
         t.add_column("vs MA200", justify="right", min_width=8)
         t.add_column("20日涨幅", justify="right", min_width=8)
+        t.add_column("量比", justify="right", min_width=6)
         t.add_column("状态", justify="center", min_width=4)
 
         for lh in leaders:
             price = f"${lh['price']:.1f}" if lh["price"] is not None else "[dim]N/A[/]"
+            vr = lh.get("vol_ratio")
+            vr_str = "[dim]N/A[/]" if vr is None else (
+                f"[bold red]{vr:.1f}x[/]" if lh.get("heavy_down") else f"{vr:.1f}x")
             t.add_row(lh["name"], price,
                       _fmt(lh["vs_ma50"], 1, "%"),
                       _fmt(lh["vs_ma200"], 1, "%"),
                       _fmt(lh["ret_20d"], 1, "%"),
+                      vr_str,
                       _status_icon(lh["status"]))
 
         self.console.print(t)
@@ -522,7 +575,8 @@ class Dashboard:
             score_str = f"+{s['score']}" if s["score"] > 0 else str(s["score"])
             color = "red" if s["score"] > 0 else "green"
             desc = f"  [dim]{s['desc']}[/]" if s.get("desc") else ""
-            lines.append(f"  {icon} [{color}][风险{score_str}][/{color}] {s['name']}{desc}")
+            tag = "" if s.get("source", "spec") == "spec" else " [dim](扩展)[/]"
+            lines.append(f"  {icon} [{color}][风险{score_str}][/{color}] {s['name']}{tag}{desc}")
 
         self.console.print(Panel("\n".join(lines), title="[bold]🔔 活跃信号[/]",
                                  border_style="yellow"))
@@ -661,13 +715,14 @@ class MarkdownReport:
         level = self.r["risk_level"]
         dangers = self.r.get("danger_count", 0)
 
+        b1, b2, b3 = RISK_BANDS
         if "数据不足" in level:
             badge = "⚠️"
-        elif score <= 30:
+        elif score <= b1:
             badge = "🟢"
-        elif score <= 50:
+        elif score <= b2:
             badge = "🟡"
-        elif score <= 70:
+        elif score <= b3:
             badge = "🔴"
         else:
             badge = "🔴🔴"
@@ -676,7 +731,8 @@ class MarkdownReport:
 
         self._w("## 🎯 综合评估")
         self._w()
-        self._w(f"- 风险评分: {badge} **{score}** — {level}")
+        self._w(f"- 风险评分: {badge} **{score}** / {MAX_RISK_POSITIVE} — {level}")
+        self._w(f"  <sub>档位: ≤0 低 / ≤{b1} 中低 / ≤{b2} 中等 / ≤{b3} 高 / >{b3} 极高</sub>")
         self._w(f"- 危险信号: **{dangers}** 项"
                 + ("（总分可被利好信号对冲，请同时看这一项）" if dangers >= 3 else ""))
         self._w(f"- 市场阶段: {self.r['market_phase']}")
@@ -819,9 +875,12 @@ class MarkdownReport:
         for lh in leaders:
             icon = _md_icon(lh["status"])
             price = f"${lh['price']:.1f}" if lh["price"] is not None else "N/A"
+            vr = lh.get("vol_ratio")
+            vol_str = "" if vr is None else (
+                f" | 量比: {vr:.1f}x" + (" ⚠️放量下跌" if lh.get("heavy_down") else ""))
             self._w(f"- {icon} **{lh['name']}** {price} | "
                     f"MA50: {_md_val(lh['vs_ma50'], 1, '%')} | "
-                    f"20日: {_md_val(lh['ret_20d'], 1, '%')}")
+                    f"20日: {_md_val(lh['ret_20d'], 1, '%')}{vol_str}")
         self._w()
 
     def _signals(self):
@@ -838,7 +897,8 @@ class MarkdownReport:
             icon = _md_icon(s["level"])
             score_str = f"+{s['score']}" if s["score"] > 0 else str(s["score"])
             desc = f" — {s['desc']}" if s.get("desc") else ""
-            self._w(f"- {icon} **[风险{score_str}]** {s['name']}{desc}")
+            tag = "" if s.get("source", "spec") == "spec" else " *(扩展)*"
+            self._w(f"- {icon} **[风险{score_str}]** {s['name']}{tag}{desc}")
         self._w()
 
     def _combos(self):
