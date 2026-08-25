@@ -7,7 +7,8 @@ from rich.columns import Columns
 
 from config import (grade, ASSET_CLASSES, ASSET_LABELS, ASSET_EMOJI,
                     CYCLE_EMOJI, CYCLE_STYLES, CYCLE_REFERENCE,
-                    UP_COLOR_CONVENTION, RISK_BANDS, MAX_RISK_POSITIVE)
+                    UP_COLOR_CONVENTION, RISK_BANDS, MAX_RISK_POSITIVE,
+                    CORR_WINDOW, CORR_LEVELS, VALUATION_LEVELS)
 
 
 def _status_icon(level):
@@ -118,6 +119,14 @@ def _fmt_macd(g):
     return "多头" if g.get("SPY_MACD_BULL") else "空头"
 
 
+def _fmt_skew(g):
+    v = g.get("SKEW")
+    if v is None:
+        return None
+    p = g.get("SKEW_PCTILE")
+    return f"{v:.0f}" if p is None else f"{v:.0f} (近2年 {p*100:.0f}% 分位)"
+
+
 def _fmt_pmi(g):
     v = g.get("PMI_PROXY")
     if v is None:
@@ -148,10 +157,61 @@ def _fmt_fed(g):
     return f"{upper:.2f}% (US2Y差 {gap:+.2f}%, {lean})"
 
 
+def _fmt_rate_split(g):
+    be, real = g.get("BREAKEVEN"), g.get("TIPS")
+    if be is None or real is None:
+        return None
+    driver = {"real": "实际利率推动(杀估值)", "real_easing": "实际利率回落(利好估值)",
+              "inflation": "通胀预期推动", "disinflation": "通胀预期回落"}.get(
+                  g.get("RATE_DRIVER"), "—")
+    return f"实际 {real:.2f}% + 预期 {be:.2f}% ({driver})"
+
+
+def _fmt_erp(g):
+    ey, erp = g.get("SPY_EY"), g.get("ERP_NOMINAL")
+    if ey is None:
+        return None
+    pe = g.get("SPY_PE")
+    if pe:
+        tier = ("极高" if pe >= VALUATION_LEVELS["PE_EXTREME"]
+                else "偏高" if pe >= VALUATION_LEVELS["PE_HIGH"] else "合理")
+        base = f"PE {pe:.1f}({tier}) / 盈利收益率 {ey:.2f}%"
+    else:
+        base = f"盈利收益率 {ey:.2f}%"
+    return base + (f"，减10Y {erp:+.2f}pp" if erp is not None else "")
+
+
+def _fmt_corr(g):
+    c = g.get("STOCK_BOND_CORR")
+    if c is None:
+        return None
+    hi, lo = CORR_LEVELS["HEDGE_BROKEN"], CORR_LEVELS["HEDGE_GOOD"]
+    verdict = "长债不对冲股票" if c > hi else "对冲有效" if c < lo else "对冲减弱"
+    return f"{c:+.2f} ({CORR_WINDOW}日, {verdict})"
+
+
+def _fmt_fed_liquidity(g):
+    assets = g.get("FED_ASSETS")
+    if assets is None:
+        return None
+    chg = g.get("FED_ASSETS_13W_CHG")
+    rrp = g.get("ON_RRP")
+    parts = [f"{assets:.2f}万亿"]
+    if chg is not None:
+        parts.append(f"13周{chg:+.3f}万亿 ({'扩表' if chg > 0 else 'QT缩表'})")
+    if rrp is not None:
+        parts.append(f"逆回购 {rrp:.0f}十亿")
+    return "，".join(parts)
+
+
 # Indicators whose status is not a simple threshold comparison.
 GRADE_OVERRIDES = {
     "SPY_MACD_BULL": lambda g: "safe" if g.get("SPY_MACD_BULL") else "danger",
     "CURVE": lambda g: grade("T10Y2Y", g.get("T10Y2Y")),
+    "SKEW": lambda g: (
+        None if g.get("SKEW_PCTILE") is None
+        else "danger" if g["SKEW_PCTILE"] >= 0.95
+        else "warning" if g["SKEW_PCTILE"] >= 0.80 else "safe"),
     "SPY_WEEKLY_CROSS": lambda g: (
         "danger" if g.get("SPY_WEEKLY_CROSS") == "death"
         else None if g.get("SPY_MA21W") is None
@@ -159,6 +219,22 @@ GRADE_OVERRIDES = {
     # Informational: US2Y below the policy rate is a liquidity tailwind,
     # above it simply means no cuts are priced — not a risk in itself.
     "FED_UPPER": lambda g: (None if g.get("FED_UPPER") is None else "safe"),
+    "RATE_SPLIT": lambda g: (
+        None if g.get("BREAKEVEN") is None
+        else "danger" if g.get("RATE_DRIVER") == "real"
+        else "safe" if g.get("RATE_DRIVER") in ("real_easing", "disinflation")
+        else "warning"),
+    "ERP_NOMINAL": lambda g: (
+        None if g.get("ERP_NOMINAL") is None
+        else "danger" if g["ERP_NOMINAL"] < VALUATION_LEVELS["ERP_THIN"]
+        else "safe" if g["ERP_NOMINAL"] > VALUATION_LEVELS["ERP_RICH"] else "warning"),
+    "STOCK_BOND_CORR": lambda g: (
+        None if g.get("STOCK_BOND_CORR") is None
+        else "danger" if g["STOCK_BOND_CORR"] > CORR_LEVELS["HEDGE_BROKEN"]
+        else "safe" if g["STOCK_BOND_CORR"] < CORR_LEVELS["HEDGE_GOOD"] else "warning"),
+    "FED_LIQUIDITY": lambda g: (
+        None if g.get("FED_ASSETS") is None
+        else "safe" if (g.get("FED_ASSETS_13W_CHG") or 0) > 0 else "warning"),
 }
 
 
@@ -185,6 +261,10 @@ INDICATOR_GROUPS = [
          "<350bp 利好 / >500bp 利空 / >700bp 危机"),
         ("M2_YOY", "M2同比增速", 1, "%", None,
          ">2% 流动性充裕(利好) / <0% 萎缩(利空)"),
+        ("RATE_SPLIT", "10Y拆解", 2, "", _fmt_rate_split,
+         "名义=实际+通胀预期。**实际利率推动的上行才真正杀估值**"),
+        ("FED_LIQUIDITY", "美联储流动性", 2, "", _fmt_fed_liquidity,
+         "扩表=注入流动性 / QT缩表=抽水；逆回购余额是体系冗余流动性"),
     ]),
     ("第二层: 情绪", "😰 情绪", [
         ("VIX", "VIX", 1, "", None,
@@ -193,8 +273,8 @@ INDICATOR_GROUPS = [
          "纳指专用恐慌指数 / >30 风险区间 / **>40 极端恐慌(强烈买入)**"),
         ("VIX_TERM", "VIX期限结构", 2, "", _fmt_vix_term,
          ">1倒挂=真正恐慌，比VIX绝对值更可靠"),
-        ("SKEW", "SKEW", 0, "", None,
-         ">140+VIX低=暗流涌动 / >150 极度焦虑"),
+        ("SKEW", "SKEW", 0, "", _fmt_skew,
+         "**按近2年分位数判定**（固定140已失效: 2021年后55.7%的交易日都超过）/ >80%分位+VIX低=暗流涌动"),
         ("FEAR_GREED", "恐惧贪婪指数", 0, "", _fmt_fear_greed,
          "<15 极度恐惧(配合VIX=买) / >85 贪婪(减仓)"),
     ]),
@@ -221,6 +301,12 @@ INDICATOR_GROUPS = [
          ">2% 稳健扩张 / <0% 衰退"),
         ("FED_UPPER", "联邦基金上限", 2, "%", _fmt_fed,
          "US2Y 低于政策利率=市场抢跑降息(利好流动性)"),
+    ]),
+    ("第六层: 估值与跨资产", "💰 估值与跨资产", [
+        ("ERP_NOMINAL", "股债性价比", 2, "", _fmt_erp,
+         "盈利收益率-10Y。**<0 表示股票收益率低于无风险利率(无估值保护)** / >2pp 有补偿"),
+        ("STOCK_BOND_CORR", "股债相关性", 2, "", _fmt_corr,
+         "永久组合假设长债对冲股票。**转正=对冲失效，债券仓位不再分散风险**"),
     ]),
     ("第五层: 技术面", "📉 技术面", [
         ("SPY_VS_MA200", "SPY vs MA200", 1, "%", None,
@@ -262,6 +348,7 @@ class Dashboard:
         self._risk_summary()
         self._cycle_panel()
         self._position_panel()
+        self._rebalance_panel()
         self._indicator_tables()
         self._leader_table()
         self._signals_panel()
@@ -435,6 +522,15 @@ class Dashboard:
 
         self.console.print(t)
 
+        caveats = cycle.get("allocation_caveats") or []
+        if caveats:
+            lines = []
+            for c in caveats:
+                style = "yellow" if "不对冲" in c or "无估值补偿" in c else "dim"
+                lines.append(f"[{style}]• {c}[/{style}]")
+            self.console.print(Panel("\n".join(lines),
+                                     title="[bold]⚠️ 配置前提检查[/]", border_style="yellow"))
+
     # ------------------------------------------------------------------
     # Position target signals panel
     # ------------------------------------------------------------------
@@ -499,6 +595,40 @@ class Dashboard:
             self.console.print(Panel("\n".join(detail_lines),
                                      title="[bold]📋 加仓信号明细[/]",
                                      border_style="magenta"))
+
+    # ------------------------------------------------------------------
+    # Rebalancing (spec 五、再平衡策略)
+    # ------------------------------------------------------------------
+
+    def _rebalance_panel(self):
+        rb = self.r.get("rebalance")
+        if not rb:
+            return
+        if not rb.get("available"):
+            self.console.print(Panel(f"[yellow]{rb.get('error', '组合数据不可用')}[/]",
+                                     title="[bold]⚖️ 再平衡检查[/]", border_style="yellow"))
+            return
+
+        t = Table(title=f"⚖️ 再平衡检查 (组合 ${rb['total']:,.0f})", show_header=True,
+                  header_style="bold cyan", expand=True, padding=(0, 1))
+        t.add_column("资产类别", style="bold", min_width=10)
+        t.add_column("当前", justify="right", min_width=7)
+        t.add_column("目标", justify="right", min_width=7)
+        t.add_column("偏离", justify="right", min_width=8)
+        t.add_column("交易额", justify="right", min_width=10)
+        t.add_column("状态", min_width=30)
+
+        styles = {"force": "bold red", "trigger": "red", "observe": "yellow", "ok": "dim"}
+        for r in rb["rows"]:
+            st = styles.get(r["status"], "dim")
+            t.add_row(r["label"], f"{r['current']:.1f}%", f"{r['target']:.1f}%",
+                      f"[{st}]{r['deviation']:+.1f}pp[/{st}]",
+                      f"${r['trade_value']:,.0f}" if r["status"] != "ok" else "[dim]—[/]",
+                      f"[{st}]{r['reason']}[/{st}]")
+        self.console.print(t)
+        border = "red" if rb["actions"] else "yellow" if rb["quarterly_due"] else "green"
+        self.console.print(Panel(rb["summary"], title="[bold]⚖️ 再平衡结论[/]",
+                                 border_style=border))
 
     # ------------------------------------------------------------------
     # Indicator tables
@@ -651,6 +781,7 @@ class MarkdownReport:
         self._risk_summary()
         self._cycle_section()
         self._position_section()
+        self._rebalance_section()
         self._ai_section()
         self._indicator_guide()
         self._leader_table()
@@ -787,6 +918,14 @@ class MarkdownReport:
             self._w(f"  {detail}")
         self._w()
 
+        caveats = cycle.get("allocation_caveats") or []
+        if caveats:
+            self._w("**⚠️ 配置前提检查:**")
+            self._w()
+            for c in caveats:
+                self._w(f"- {c}")
+            self._w()
+
     def _position_section(self):
         pos = self.r.get("position_signals")
         if not pos:
@@ -840,6 +979,29 @@ class MarkdownReport:
                 for d in sig["details"]:
                     self._w(f"- {d}")
                 self._w()
+
+    def _rebalance_section(self):
+        rb = self.r.get("rebalance")
+        if not rb:
+            return
+        self._w("## ⚖️ 再平衡检查")
+        self._w()
+        if not rb.get("available"):
+            self._w(f"> ⚠️ {rb.get('error', '组合数据不可用')}")
+            self._w()
+            return
+
+        self._w(f"> **{rb['summary']}**  ·  组合总额 ${rb['total']:,.0f}"
+                f"  ·  最小起振 ${rb['min_trade']:,.0f}")
+        self._w()
+        self._w("| 资产类别 | 当前 | 目标 | 偏离 | 交易额 | 状态 |")
+        self._w("|------|------|------|------|------|------|")
+        icons = {"force": "🔴", "trigger": "🟠", "observe": "🟡", "ok": "🟢"}
+        for r in rb["rows"]:
+            trade = f"${r['trade_value']:,.0f}" if r["status"] != "ok" else "—"
+            self._w(f"| {icons.get(r['status'], '⚪')} {r['label']} | {r['current']:.1f}% | "
+                    f"{r['target']:.1f}% | {r['deviation']:+.1f}pp | {trade} | {r['reason']} |")
+        self._w()
 
     def _ai_section(self):
         if not self.ai_summary:

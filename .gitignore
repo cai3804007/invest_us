@@ -8,3 +8,6 @@ dist/
 build/
 report.md
 .DS_Store
+# 持仓与再平衡状态：含个人财务数据，不入库
+portfolio.json
+.rebalance_state.json

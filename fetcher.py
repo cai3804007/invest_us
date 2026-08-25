@@ -14,6 +14,7 @@ class MarketDataFetcher:
         self.fred_data = {}
         self.fear_greed = None
         self.fear_greed_label = ""
+        self.valuation = {}
         self._errors = []
 
     def fetch_all(self, console=None):
@@ -22,6 +23,7 @@ class MarketDataFetcher:
         self._fetch_yahoo(console)
         self._fetch_fred(console)
         self._fetch_fear_greed(console)
+        self._fetch_valuation(console)
         if console and self._errors:
             for err in self._errors:
                 console.print(f"  [yellow]{err}[/]")
@@ -171,6 +173,31 @@ class MarketDataFetcher:
             self.fear_greed = None
             self.fear_greed_label = ""
             self._errors.append(f"CNN Fear & Greed 获取失败 ({type(e).__name__}: {e})")
+
+    # ------------------------------------------------------------------
+    # Valuation (index P/E)
+    #
+    # The whole system had no valuation input at all. yfinance exposes a
+    # trailing P/E on the index ETFs; forwardPE is usually absent, so the
+    # earnings yield is derived from the trailing figure and labelled as such.
+    # ------------------------------------------------------------------
+
+    def _fetch_valuation(self, console=None):
+        if console:
+            console.print("  [dim]估值 (指数 P/E)...[/]")
+        for name in ("SPY", "QQQ"):
+            try:
+                info = yf.Ticker(name).info or {}
+                pe = info.get("trailingPE")
+                if pe and pe > 0:
+                    self.valuation[name] = {
+                        "pe": float(pe),
+                        "earnings_yield": 100.0 / float(pe),
+                    }
+                else:
+                    self._errors.append(f"估值: {name} 无 trailingPE")
+            except Exception as e:
+                self._errors.append(f"估值: {name} 失败 ({type(e).__name__}: {e})")
 
     # ------------------------------------------------------------------
     # Helper accessors

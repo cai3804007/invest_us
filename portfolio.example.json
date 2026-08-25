@@ -1,0 +1,11 @@
+{
+  "_comment": "复制为 portfolio.json 并填入各资产类别的当前市值（美元）。键必须是下列六个之一。",
+  "holdings": {
+    "stocks": 0,
+    "long_bonds": 0,
+    "cash": 0,
+    "gold": 0,
+    "tips": 0,
+    "commodities": 0
+  }
+}

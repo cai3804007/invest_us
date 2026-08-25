@@ -1,10 +1,13 @@
 import pandas as pd
+import rebalance
 from config import (MA50, MA200, MA250, RSI_PERIOD, LEADING_STOCKS,
                     POSITION_TARGETS, SIGNAL_LEVELS, TRADING_DAYS_YEAR,
                     CRITICAL_SERIES, CRITICAL_DERIVED, MACRO_SERIES,
                     SIGNALS, signal_meta, threshold, RISK_BANDS,
                     PMI_PROXY_SERIES, PMI_LEVELS, CYCLE_LEVELS, CYCLE_GATES,
-                    MA_WEEKS_FAST, MA_WEEKS_SLOW)
+                    MA_WEEKS_FAST, MA_WEEKS_SLOW, VALUATION_LEVELS,
+                    CORR_WINDOW, CORR_LEVELS, SKEW_LOOKBACK,
+                    SKEW_PCTILE_HIGH, SKEW_PCTILE_EXTREME)
 
 
 # ======================================================================
@@ -59,6 +62,31 @@ def calc_macd(series, fast=12, slow=26, signal=9):
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
     histogram = macd_line - signal_line
     return macd_line, signal_line, histogram
+
+
+def days_below(series, reference, lookback=10):
+    """Consecutive most-recent sessions with series < reference.
+
+    The strategy document asks for persistence in several places —
+    「QQQ跌破MA200且**无法快速收回**」,「PMI**连续**跌破50」— but every check
+    was evaluated on the latest bar alone, so a single-day dip flipped the
+    verdict. Returns 0 if the latest bar is not below.
+    """
+    if series is None or reference is None or len(series) == 0:
+        return 0
+    if not isinstance(reference, pd.Series):
+        reference = pd.Series(reference, index=series.index)
+    aligned = pd.DataFrame({"s": series, "r": reference}).dropna()
+    if aligned.empty:
+        return 0
+    below = (aligned["s"] < aligned["r"]).iloc[-lookback:]
+    n = 0
+    for v in reversed(below.tolist()):
+        if v:
+            n += 1
+        else:
+            break
+    return n
 
 
 def weekly_ma_cross(series, fast_weeks, slow_weeks):
@@ -177,6 +205,8 @@ class MarketAnalyzer:
 
         cycle_result = self._detect_economic_cycle()
         position_signals = self._analyze_position_targets()
+        # Inert unless the user supplies a portfolio file — see rebalance.py.
+        rebalance_result = rebalance.analyse(cycle_result["allocation"])
 
         return {
             "indicators": self.indicators,
@@ -192,6 +222,7 @@ class MarketAnalyzer:
             "economic_cycle": cycle_result,
             "position_signals": position_signals,
             "data_health": self.data_health,
+            "rebalance": rebalance_result,
         }
 
     # ------------------------------------------------------------------
@@ -256,6 +287,12 @@ class MarketAnalyzer:
         g["VXN"] = self.f.get_latest("VXN")
         g["VIX3M"] = self.f.get_latest("VIX3M")
         g["SKEW"] = self.f.get_latest("SKEW")
+        # Percentile within its own trailing distribution — see SKEW_LOOKBACK.
+        skew_s = self.f.get_series("SKEW")
+        g["SKEW_PCTILE"] = None
+        if skew_s is not None and len(skew_s) >= 60:
+            window = skew_s.iloc[-SKEW_LOOKBACK:]
+            g["SKEW_PCTILE"] = float((window <= float(skew_s.iloc[-1])).mean())
         g["FEAR_GREED"] = self.f.fear_greed
         g["FEAR_GREED_LABEL"] = getattr(self.f, "fear_greed_label", "")
 
@@ -299,6 +336,9 @@ class MarketAnalyzer:
         # spec 阶段1 checks price against the 200-day *or* 250-day average.
         g["SPY_MA250"] = latest(calc_sma(spy_s, MA250))
         g["QQQ_MA250"] = latest(calc_sma(qqq_s, MA250))
+
+        g["SPY_DAYS_BELOW_MA200"] = days_below(spy_s, calc_sma(spy_s, MA200))
+        g["QQQ_DAYS_BELOW_MA200"] = days_below(qqq_s, calc_sma(qqq_s, MA200))
 
         wk_cross, wk_fast, wk_slow = weekly_ma_cross(spy_s, MA_WEEKS_FAST, MA_WEEKS_SLOW)
         g["SPY_WEEKLY_CROSS"] = wk_cross
@@ -391,6 +431,39 @@ class MarketAnalyzer:
         else:
             g["UNRATE_TREND"] = None
 
+        # ----- Rate decomposition: nominal = real + breakeven -----
+        # Previously only nominal (US10Y) and real (TIPS) were tracked, and at
+        # rho = 0.945 they scored the same factor twice without ever saying
+        # *why* rates moved. Breakeven separates an inflation-expectation move
+        # from a real-discount-rate move, which matter very differently to
+        # equity multiples.
+        g["BREAKEVEN"] = self.f.get_fred_latest("BREAKEVEN")
+        be_s = self.f.get_fred_series("BREAKEVEN")
+        tips_s = self.f.get_fred_series("TIPS")
+        g["BREAKEVEN_20D_CHG"] = None
+        g["REAL_RATE_20D_CHG"] = None
+        g["RATE_DRIVER"] = None
+        if be_s is not None and len(be_s) >= 21:
+            g["BREAKEVEN_20D_CHG"] = float(be_s.iloc[-1] - be_s.iloc[-21]) * 100
+        if tips_s is not None and len(tips_s) >= 21:
+            g["REAL_RATE_20D_CHG"] = float(tips_s.iloc[-1] - tips_s.iloc[-21]) * 100
+        d_be, d_real = g["BREAKEVEN_20D_CHG"], g["REAL_RATE_20D_CHG"]
+        if d_be is not None and d_real is not None:
+            if abs(d_real) >= abs(d_be):
+                g["RATE_DRIVER"] = "real" if d_real > 0 else "real_easing"
+            else:
+                g["RATE_DRIVER"] = "inflation" if d_be > 0 else "disinflation"
+
+        # ----- Fed liquidity: balance sheet and reverse repo -----
+        # spec 1.2 names ON RRP explicitly; liquidity had only the monthly,
+        # lagging M2 to stand on.
+        fa_s = self.f.get_fred_series("FED_ASSETS")
+        g["FED_ASSETS"] = float(fa_s.iloc[-1]) / 1e6 if fa_s is not None and len(fa_s) else None
+        g["FED_ASSETS_13W_CHG"] = None
+        if fa_s is not None and len(fa_s) >= 14:
+            g["FED_ASSETS_13W_CHG"] = float(fa_s.iloc[-1] - fa_s.iloc[-14]) / 1e6
+        g["ON_RRP"] = self.f.get_fred_latest("ON_RRP")
+
         # GDP year-over-year, derived from the quarterly real GDP level so it
         # matches the spec's "GDP同比" rather than FRED's annualised QoQ print.
         gdp_s = self.f.get_fred_series("GDP")
@@ -448,6 +521,39 @@ class MarketAnalyzer:
         us2y = g.get("US2Y")
         g["FED_MARKET_GAP"] = (us2y - g["FED_UPPER"]
                                if us2y is not None and g["FED_UPPER"] is not None else None)
+
+        # ----- Valuation anchor -----
+        # The system had no valuation input whatsoever. Earnings yield minus
+        # the nominal 10Y ("Fed model" spread) says whether equities are paid
+        # for relative to cash-equivalents; minus the real rate says it in
+        # real terms. Deliberately not scored — see VALUATION_LEVELS.
+        val = getattr(self.f, "valuation", {}) or {}
+        for name in ("SPY", "QQQ"):
+            entry = val.get(name) or {}
+            g[f"{name}_PE"] = entry.get("pe")
+            g[f"{name}_EY"] = entry.get("earnings_yield")
+        ey = g.get("SPY_EY")
+        g["ERP_NOMINAL"] = (ey - g["US10Y"]
+                            if ey is not None and g.get("US10Y") is not None else None)
+        g["ERP_REAL"] = (ey - g["TIPS"]
+                         if ey is not None and g.get("TIPS") is not None else None)
+
+        # ----- Stock/bond correlation -----
+        # The cycle allocation table leans on long Treasuries as the equity
+        # hedge (up to 30% in a recession). If that correlation has flipped
+        # positive, the diversification the table assumes is not there.
+        spy_c, tlt_c = self.f.get_series("SPY"), self.f.get_series("TLT")
+        g["STOCK_BOND_CORR"] = None
+        if spy_c is not None and tlt_c is not None:
+            rr = pd.DataFrame({"s": spy_c, "t": tlt_c}).dropna().pct_change().dropna()
+            if len(rr) >= CORR_WINDOW:
+                w = rr.iloc[-CORR_WINDOW:]
+                # A flat series has zero variance, which makes the correlation
+                # undefined (and noisy in numpy). Skip rather than emit NaN.
+                if w["s"].std() > 0 and w["t"].std() > 0:
+                    c = w["s"].corr(w["t"])
+                    if pd.notna(c):
+                        g["STOCK_BOND_CORR"] = float(c)
 
         # Copper/Gold 20-day trend
         cu_s = self.f.get_series("COPPER")
@@ -584,13 +690,17 @@ class MarketAnalyzer:
         if gt(vt, threshold("VIX_TERM")):
             self._add_signal("VIX_TERM_INVERTED", f"VIX/VIX3M={vt:.2f}，近月恐慌高于远月")
 
-        # SKEW
+        # SKEW — graded against its own trailing distribution. A fixed 140
+        # fired on 55.7% of recent sessions and carried no information.
         skew = g.get("SKEW")
-        if skew is not None and vix is not None:
-            if skew > threshold("SKEW", "warn") and vix < SIGNAL_LEVELS["VIX_CALM_FOR_SKEW"]:
-                self._add_signal("SKEW_HIGH_VIX_LOW", f"SKEW={skew:.0f}, VIX={vix:.1f}")
-            elif skew > threshold("SKEW"):
-                self._add_signal("SKEW_EXTREME", f"SKEW={skew:.0f}")
+        pct = g.get("SKEW_PCTILE")
+        if skew is not None and pct is not None:
+            if pct >= SKEW_PCTILE_EXTREME:
+                self._add_signal("SKEW_EXTREME",
+                                 f"SKEW={skew:.0f}，处于近2年 {pct*100:.0f}% 分位")
+            elif pct >= SKEW_PCTILE_HIGH and lt(vix, SIGNAL_LEVELS["VIX_CALM_FOR_SKEW"]):
+                self._add_signal("SKEW_HIGH_VIX_LOW",
+                                 f"SKEW={skew:.0f}（近2年 {pct*100:.0f}% 分位）, VIX={vix:.1f}")
 
         # Fear & Greed
         fg = g.get("FEAR_GREED")
@@ -711,13 +821,17 @@ class MarketAnalyzer:
         spy_ma200 = g.get("SPY_MA200")
         if spy is not None and spy_ma200 is not None:
             if spy < spy_ma200:
-                self._add_signal("SPY_BELOW_MA200", f"SPY={spy:.1f}, MA200={spy_ma200:.1f}")
+                held = g.get("SPY_DAYS_BELOW_MA200") or 0
+                self._add_signal("SPY_BELOW_MA200",
+                                 f"SPY={spy:.1f}, MA200={spy_ma200:.1f}，已持续{held}日")
 
         qqq = g.get("QQQ")
         qqq_ma200 = g.get("QQQ_MA200")
         if qqq is not None and qqq_ma200 is not None:
             if qqq < qqq_ma200:
-                self._add_signal("QQQ_BELOW_MA200", f"QQQ={qqq:.1f}, MA200={qqq_ma200:.1f}")
+                held = g.get("QQQ_DAYS_BELOW_MA200") or 0
+                self._add_signal("QQQ_BELOW_MA200",
+                                 f"QQQ={qqq:.1f}, MA200={qqq_ma200:.1f}，已持续{held}日")
 
         # MA golden cross / death cross
         spy_ma50 = g.get("SPY_MA50")
@@ -874,15 +988,18 @@ class MarketAnalyzer:
         })
 
         # Combo 5: VIX low + SKEW high
+        # Uses the same trailing-percentile basis as the scored SKEW signal.
+        # On the old fixed 140 this combo triggered on 55.7% of recent
+        # sessions, which is not a "combo" so much as a constant.
         skew = g.get("SKEW")
-        c5_triggered = False
-        if skew is not None and vix is not None:
-            c5_triggered = (skew > SIGNAL_LEVELS["SKEW_QUIET_STORM"]
-                            and vix < SIGNAL_LEVELS["VIX_QUIET_STORM"])
+        skew_pct = g.get("SKEW_PCTILE")
+        c5_triggered = bool(gte(skew_pct, SKEW_PCTILE_HIGH)
+                            and lt(vix, SIGNAL_LEVELS["VIX_QUIET_STORM"]))
         self.combos.append({
             "name": "VIX低+SKEW高",
             "triggered": c5_triggered,
-            "detail": "暴风雨前的宁静" if c5_triggered else ""
+            "detail": (f"暴风雨前的宁静 (SKEW {skew:.0f} 处 {skew_pct*100:.0f}% 分位, VIX {vix:.1f})"
+                       if c5_triggered else "")
         })
 
         # Combo 6: news reaction (manual)
@@ -1024,7 +1141,9 @@ class MarketAnalyzer:
             lt(pmi, PMI_LEVELS["CONTRACTION"]) and g.get("PMI_TREND") == "falling",
             # spec: 大盘**周线**死叉（21周线跌破50周线）— not the daily cross
             g.get("SPY_WEEKLY_CROSS") == "death",
-            lt(qqq, qqq_ma200),
+            # spec adds 「且无法快速收回」 — require the break to hold rather
+            # than counting a single-session dip below the average.
+            (g.get("QQQ_DAYS_BELOW_MA200") or 0) >= SIGNAL_LEVELS["MA200_BREAK_DAYS"],
         ]
         if sum(strong_sell_conds) >= 3:
             return ("强烈卖出", "系统性风险极高，建议减仓至20%以下，可配置TLT对冲")
@@ -1293,6 +1412,24 @@ class MarketAnalyzer:
 
         allocation = self._cycle_allocation(cycle, inflation_high)
 
+        # The allocation table treats long Treasuries as the equity hedge. If
+        # the rolling correlation has flipped positive that assumption no
+        # longer holds, so say so next to the weights instead of leaving the
+        # reader to assume 2000s-style diversification.
+        corr = g.get("STOCK_BOND_CORR")
+        alloc_caveats = []
+        if corr is not None and corr > CORR_LEVELS["HEDGE_BROKEN"]:
+            alloc_caveats.append(
+                f"股债{CORR_WINDOW}日相关性 {corr:+.2f} 为正 —— 长债当前不对冲股票，"
+                "债券仓位的分散作用弱于配置表假设")
+        elif corr is not None and corr < CORR_LEVELS["HEDGE_GOOD"]:
+            alloc_caveats.append(f"股债{CORR_WINDOW}日相关性 {corr:+.2f}，长债对冲有效")
+        erp_n = g.get("ERP_NOMINAL")
+        if erp_n is not None and erp_n < VALUATION_LEVELS["ERP_THIN"]:
+            alloc_caveats.append(
+                f"标普盈利收益率 {g['SPY_EY']:.2f}% 低于10Y {g['US10Y']:.2f}%"
+                f"（差 {erp_n:+.2f}pp）—— 股票相对债券无估值补偿")
+
         return {
             "cycle": cycle,
             "cycle_cn": cycle_cn,
@@ -1304,6 +1441,7 @@ class MarketAnalyzer:
             "inflation_label": inflation_label,
             "cpi_yoy": cpi_yoy,
             "allocation": allocation,
+            "allocation_caveats": alloc_caveats,
         }
 
     # ------------------------------------------------------------------
@@ -1469,6 +1607,19 @@ class MarketAnalyzer:
             if gt(bench_vix, 30) and lt(rsi_val, 35):
                 score += 2
                 details.append(f"{bench_vix_key}={bench_vix:.1f}+RSI超卖 黄金坑(+2)")
+
+            # Valuation gate on conviction. A technically oversold entry into
+            # a market whose earnings yield sits below the risk-free rate is a
+            # weaker proposition than the same setup when equities are paid
+            # for; this trims the add rather than adding to the risk score.
+            erp = g.get("ERP_NOMINAL")
+            if erp is not None and score > 0:
+                if erp < VALUATION_LEVELS["ERP_THIN"]:
+                    score -= 1
+                    details.append(f"盈利收益率低于10Y {abs(erp):.2f}pp 估值无保护(-1)")
+                elif erp > VALUATION_LEVELS["ERP_RICH"]:
+                    score += 1
+                    details.append(f"盈利收益率高于10Y {erp:.2f}pp 估值有补偿(+1)")
 
             # Fear&Greed + RSI overbought combo
             if gt(fg, 80) and gt(rsi_val, 65):
