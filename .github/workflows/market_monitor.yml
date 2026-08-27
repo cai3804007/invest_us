@@ -46,12 +46,21 @@ jobs:
   monitor:
     runs-on: ubuntu-latest
 
+    # state.json is committed back so anomaly detection can compare against
+    # the previous run. It also keeps repo activity alive, which is what the
+    # separate keepalive workflow was for.
+    permissions:
+      contents: write
+
     env:
       FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       SERPAPI_API_KEYS: ${{ secrets.SERPAPI_API_KEYS }}
       TAVILY_API_KEYS: ${{ secrets.TAVILY_API_KEYS }}
       SERVERCHAN3_SENDKEY: ${{ secrets.SERVERCHAN3_SENDKEY }}
+      # 报警侧重：accumulate = 长期持有+逢跌加码（静音战术噪音，加密回撤档位）
+      #           tactical   = 完整风险监控
+      ALERT_PROFILE: ${{ vars.ALERT_PROFILE || 'accumulate' }}
 
     steps:
       - name: Checkout
@@ -76,31 +85,69 @@ jobs:
             echo "type=daily" >> "$GITHUB_OUTPUT"
           fi
 
+      # Push is decided inside main.py, which is the only place that knows
+      # whether an anomaly fired. Two exceptions force a push regardless:
+      #   - the Saturday cycle report (--digest), so a quiet market still
+      #     produces a periodic full picture
+      #   - a manual workflow_dispatch (--force-push), since you asked for it
       - name: Run Market Monitor
+        id: run
+        env:
+          REPORT_TYPE_LABEL: ${{ steps.report_type.outputs.type == 'cycle' && '周期' || '日报' }}
         run: |
-          python main.py --markdown --no-push > report.md 2>run.log || true
-          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          FLAGS="--markdown"
+          if [ "${{ steps.report_type.outputs.type }}" = "cycle" ]; then
+            FLAGS="$FLAGS --digest"
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            FLAGS="$FLAGS --force-push"
+          fi
+          echo "flags=$FLAGS" >> "$GITHUB_OUTPUT"
+          python main.py $FLAGS > report.md 2>run.log
+          {
+            echo "### 运行参数: \`$FLAGS\`"
+            echo
+            grep -E "检测到|无异常|推送原因|未推送|首次运行" run.log || true
+            echo
+            cat report.md
+          } >> "$GITHUB_STEP_SUMMARY"
           cat run.log >&2
 
-      # Pushing separately (rather than letting main.py do it) so the phone
-      # still gets a notification when the analysis step itself fails.
-      # The title logic lives in notifier.push_markdown_file — not inlined here.
-      - name: Push to phone
+      - name: Commit state
         if: always()
-        env:
-          REPORT_TYPE: ${{ steps.report_type.outputs.type }}
+        run: |
+          if [ ! -f state.json ]; then
+            echo "state.json 不存在（运行可能失败），跳过提交"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          if git diff --cached --quiet; then
+            echo "state 无变化"
+          else
+            git commit -m "chore: state $(date -u '+%Y-%m-%d')"
+            git push
+          fi
+
+      # Only fires when the analysis itself failed — otherwise main.py has
+      # already decided whether this run was worth a notification.
+      - name: Notify on failure
+        if: failure()
         run: |
           python -c "
-          import os
-          from notifier import push_markdown_file
-          label = {'daily': '日报', 'cycle': '周期', 'all': '综合'}.get(os.environ.get('REPORT_TYPE',''), '')
-          push_markdown_file('report.md', type_label=label)
-          " 2>&1 || echo "Push failed, continuing..."
+          from notifier import push_to_serverchan
+          push_to_serverchan('🔴 美股监控运行失败',
+                             '定时任务执行失败，请查看 GitHub Actions 日志。\n\n'
+                             'https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}')
+          " || echo "Failure notification also failed"
 
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: market-report-${{ steps.report_type.outputs.type }}-${{ github.run_number }}
-          path: report.md
+          path: |
+            report.md
+            state.json
           retention-days: 90

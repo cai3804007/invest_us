@@ -1,5 +1,47 @@
 import os
 
+# ------------------------------------------------------------------
+# .env 加载
+#
+# 项目里一直有 .env.local 和 .env.example，看起来像是 dotenv 风格的配置，
+# 但没有任何代码去读它 —— 所有 key 都只从进程环境变量取。结果是本地把
+# key 写进 .env.local 之后，直接 `python main.py` 仍然读不到，必须先手动
+# `source .env.local`。这里补上加载。
+#
+# 优先级：已存在的环境变量 > .env.local > .env
+# 这样 GitHub Actions 注入的 secrets 永远不会被仓库里的文件覆盖。
+# ------------------------------------------------------------------
+
+def _load_env_file(path):
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export "):].lstrip()
+                if "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip()
+                # 去掉成对的引号，但保留值内部的 = 和 #
+                if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+                    val = val[1:-1]
+                if key and key not in os.environ:
+                    os.environ[key] = val
+    except OSError:
+        # 配置文件读不了不该让整个程序起不来
+        pass
+
+
+_ENV_DIR = os.path.dirname(os.path.abspath(__file__))
+for _name in (".env.local", ".env"):
+    _load_env_file(os.path.join(_ENV_DIR, _name))
+
 FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 SERPAPI_API_KEYS = os.environ.get("SERPAPI_API_KEYS", "")
@@ -150,6 +192,113 @@ TRADING_DAYS_YEAR = 252
 # Weekly moving averages for the spec's 周线死叉 (21周线跌破50周线).
 MA_WEEKS_FAST = 21
 MA_WEEKS_SLOW = 50
+
+# ------------------------------------------------------------------
+# Alerting / push gating
+#
+# The report is produced every run (the data is needed to detect streaks and
+# state changes) but only *pushed* when something is worth interrupting for.
+# ------------------------------------------------------------------
+STATE_FILE = os.environ.get("STATE_FILE", "state.json")
+
+# Which alert levels justify a push. Drop "info" to only be woken for real
+# problems; add it back to hear about trend repairs too.
+ALERT_LEVELS = {"critical", "warning"}
+
+# A standing condition (VIX高位, 萨姆触发) re-alerts at most this often, so it
+# neither spams daily nor silently disappears.
+#
+# Calibrated on 2015-2026 SPY/QQQ (11.6y). The full alert set was replayed
+# day by day over that history to count actual pushes:
+#
+#   原参数 (3天/-2%, 单日-2%, 重复7天, 无滞回)   39.2 次/年  ≈ 每 6 个交易日
+#   仅加滞回 (阈值不变)                          33.5 次/年  ≈ 每 8 个交易日
+#   当前设置 (4天/-3%, 单日-2.5%, 重复10, 滞回)   20.3 次/年  ≈ 每 12 个交易日
+#   更保守 (4天/-4%, 单日-3%, 重复14, 滞回)       15.5 次/年  ≈ 每 16 个交易日
+#
+# 39/年 对一个"只在异常时通知"的系统来说太频繁 —— 每 6 天一次已接近每周推送。
+ALERT_REPEAT_DAYS = 10
+
+# Price-action triggers.
+#
+# Honest caveat on predictive power: over 2015-2026, once you control for
+# market regime (above/below MA200), NO price trigger showed statistically
+# significant forward 20-day excess return. Measured within-regime excess:
+#   连跌3天&-2%   +0.20pp (MA200上) / +0.27pp (MA200下)   p≈0.35  噪音
+#   连跌4天&-3%   -0.82pp / +0.51pp                       p≈0.35  噪音
+#   单日<=-2%     +0.89pp / +1.09pp                       p≈0.06  边际
+# The headline "+0.62pp excess, p=0.045" for 连跌3天 is a composition effect:
+# streaks cluster inside drawdowns, and drawdowns had higher forward returns
+# in this bull-market sample. Within a regime the edge disappears.
+#
+# So these are "worth a look" notifications, NOT signals with an edge. They
+# are therefore calibrated on **rarity and notification budget**, not on
+# backtested return.
+STREAK_MIN_DAYS = 4         # 连跌4天以上仅占 ~3% 交易日，够罕见
+STREAK_MIN_DROP = -3.0      # 且累计跌幅；避免"连跌4天共0.5%"这类无意义触发
+DAY_DROP_PCT = -2.5         # SPY 近10年约 2% 分位（-2.50%）
+DRAWDOWN_TIERS = [-20.0, -15.0, -10.0]   # 距52周高（按 ALERT_PROFILE 覆盖）
+
+# ------------------------------------------------------------------
+# Hysteresis — the single biggest source of alert noise was not the
+# thresholds but re-crossing them.
+#
+# Measured over 2015-2026:
+#   MA200 翻转     无缓冲 9.7 次/年 -> ±1% 缓冲 5.1 次/年
+#   回撤档位       无记忆 10.3 次/年 -> 记住最深档 3.4 次/年
+#
+# Price oscillating within a few tenths of a percent of its 200-day average
+# is not news, and neither is a drawdown wobbling either side of -10%.
+# ------------------------------------------------------------------
+MA200_BUFFER_PCT = 1.0       # 需穿越 ±1% 才算跌破/收复
+DRAWDOWN_RESET_PCT = -5.0    # 回撤收窄到此值以上，才重置已报过的最深档
+
+# ------------------------------------------------------------------
+# 报警侧重（ALERT_PROFILE）
+#
+# "tactical"   —— 完整风险监控：趋势翻转、周期切换、风险等级变化都报。
+#                 适合会根据信号调整整体仓位的用法。
+#
+# "accumulate" —— 长期持有 + 逢跌加码：只报"该考虑多买"的机会，
+#                 静音那些不会改变长期买入计划的战术噪音。
+#
+# 为什么要分开（2007-2026 QQQ/SPY 回测依据）：
+#   · 用评分门槛决定"是否买入"，长期跑输纯定投 2.0%~5.4%
+#     （即使闲置现金按3个月国库券计息）—— 因为 76%~88% 的时间在持币等待
+#   · 但评分确实有选点能力：评分>=6 的日子，价格平均比 MA200 低 17%，
+#     而全样本平均是高于 MA200 +6%
+#   · 矛盾的原因：信号集中在危机年（2008 触发 113 天、2022 触发 136 天，
+#     占全部高分日的 68%），而 2010-2021 十年几乎不触发。等待"相对便宜"
+#     意味着错过整段上涨，绝对成本反而更高 1.9%~3.0%
+#
+#   结论：它是**危机加码提示器**，不该用来决定日常定投买不买。
+# ------------------------------------------------------------------
+ALERT_PROFILE = os.environ.get("ALERT_PROFILE", "tactical")
+
+# 恐惧贪婪指数的报警线。analyzer 一直在取这个值，但报警层原先没用上，
+# 对"逢跌加码"的用法这是个明显缺口。
+FG_ALERT_FEAR = 20.0     # < 20 极度恐惧 -> 机会提示（< 15 升为 critical）
+FG_ALERT_GREED = 85.0    # > 85 极度贪婪 -> 仅在 accumulate 下作 info 提示
+
+# 各侧重下静音的报警 id 前缀
+ALERT_MUTE = {
+    "tactical": set(),
+    "accumulate": {
+        "MA200_RECLAIM",   # 趋势修复对长期持有者无操作含义
+        "MA200_BREAK",     # 跌破均线不改变长期买入计划（且会与回撤档位重复）
+        "RISK_UP",         # 风险评分变化属战术信号
+        "CYCLE_SHIFT",     # 周期切换影响的是资产配置，不是本月买不买
+        "NEW_DANGER",
+        "HEDGE_BROKEN",
+    },
+}
+
+# 长期加码侧重下使用更细、更深的回撤档位 —— 回测显示回撤深度是
+# 唯一与"加码时机"稳定相关的轴，比风险评分更适合做触发。
+DRAWDOWN_TIERS_BY_PROFILE = {
+    "tactical": [-20.0, -15.0, -10.0],
+    "accumulate": [-30.0, -25.0, -20.0, -15.0, -10.0, -7.0],
+}
 
 # ------------------------------------------------------------------
 # Data-quality gate

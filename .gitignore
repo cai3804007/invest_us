@@ -11,3 +11,7 @@ report.md
 # 持仓与再平衡状态：含个人财务数据，不入库
 portfolio.json
 .rebalance_state.json
+
+# 注意 state.json 是**故意入库**的：异常检测需要跨运行对比上次状态，
+# GitHub Actions 每次都是全新容器，只有提交回仓库才能持久化。
+# 它只含市场状态（风险分/周期/是否在MA200上方等），不含任何持仓或金额。

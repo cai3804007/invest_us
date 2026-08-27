@@ -89,6 +89,28 @@ def days_below(series, reference, lookback=10):
     return n
 
 
+def down_streak(series):
+    """Consecutive down sessions and the cumulative move across them.
+
+    Returns (days, cum_pct). Previously this lived inline inside the
+    position-target scoring and was only ever rendered as a string, so the
+    alert layer had no way to read it.
+    """
+    if series is None or len(series) < 2:
+        return 0, 0.0
+    days = 0
+    for j in range(len(series) - 1, 0, -1):
+        if float(series.iloc[j]) < float(series.iloc[j - 1]):
+            days += 1
+        else:
+            break
+    if days == 0:
+        return 0, 0.0
+    start = float(series.iloc[-(days + 1)])
+    now = float(series.iloc[-1])
+    return days, (now / start - 1) * 100 if start else 0.0
+
+
 def weekly_ma_cross(series, fast_weeks, slow_weeks):
     """Detect a cross of the fast weekly MA through the slow one.
 
@@ -191,6 +213,7 @@ class MarketAnalyzer:
         self._gather_indicators()
         self._gather_cycle_indicators()
         self._check_data_health()
+        self._analyze_price_action()
         self._analyze_liquidity()
         self._analyze_sentiment()
         self._analyze_leading()
@@ -222,8 +245,43 @@ class MarketAnalyzer:
             "economic_cycle": cycle_result,
             "position_signals": position_signals,
             "data_health": self.data_health,
+            "price_action": {
+                "streaks": self.indicators.get("DOWN_STREAKS", {}),
+                "day_change": self.indicators.get("DAY_CHANGE", {}),
+                "drawdown_52w": self.indicators.get("DRAWDOWN_52W", {}),
+            },
             "rebalance": rebalance_result,
         }
+
+    # ------------------------------------------------------------------
+    # Price action — streaks, single-day moves, drawdowns.
+    # These feed the alert layer, which decides what is worth notifying.
+    # ------------------------------------------------------------------
+
+    def _analyze_price_action(self):
+        g = self.indicators
+        streaks, drawdowns, day_chg = {}, {}, {}
+
+        for name in ("SPY", "QQQ"):
+            s = self.f.get_series(name)
+            if s is None or len(s) < 2:
+                continue
+            days, cum = down_streak(s)
+            streaks[name] = {"days": days, "cum_pct": cum}
+            day_chg[name] = (float(s.iloc[-1]) / float(s.iloc[-2]) - 1) * 100
+            window = s.iloc[-TRADING_DAYS_YEAR:] if len(s) >= TRADING_DAYS_YEAR else s
+            high = float(window.max())
+            if high > 0:
+                drawdowns[name] = (float(s.iloc[-1]) / high - 1) * 100
+
+        g["DOWN_STREAKS"] = streaks
+        g["DAY_CHANGE"] = day_chg
+        g["DRAWDOWN_52W"] = drawdowns
+
+        # Worst reading across the two indices, for headline purposes.
+        g["MAX_STREAK_DAYS"] = max((v["days"] for v in streaks.values()), default=0)
+        g["WORST_DRAWDOWN"] = min(drawdowns.values(), default=None)
+        g["WORST_DAY_CHANGE"] = min(day_chg.values(), default=None)
 
     # ------------------------------------------------------------------
     # Data-quality gate
@@ -1629,15 +1687,8 @@ class MarketAnalyzer:
             # Consecutive down days + cumulative decline
             # (thresholds from 30-year backtest of QQQ/SPY)
             if len(series) >= 10:
-                consec_days = 0
-                for j in range(len(series) - 1, 0, -1):
-                    if series.iloc[j] < series.iloc[j - 1]:
-                        consec_days += 1
-                    else:
-                        break
+                consec_days, cum_decline = down_streak(series)
                 if consec_days >= 3:
-                    streak_start_price = float(series.iloc[-(consec_days + 1)])
-                    cum_decline = (price / streak_start_price - 1) * 100
                     # Use highest matching tier only (no double counting)
                     if consec_days >= 5 and cum_decline <= -7:
                         score += 3

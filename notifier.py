@@ -12,7 +12,7 @@ def _parse_uid(sendkey):
     return m.group(1) if m else None
 
 
-def build_report_title(result, type_label=None):
+def build_report_title(result, type_label=None, alerts=None):
     """Build the push title from an analysis result.
 
     Single definition shared by every caller — this logic previously existed
@@ -25,6 +25,23 @@ def build_report_title(result, type_label=None):
     health = result.get("data_health") or {}
     if health.get("missing_critical"):
         return f"{prefix}⚠️ 美股监控 | 数据不足，未出结论"
+
+    # When an anomaly triggered the push, the title should say which one —
+    # "风险35 中低风险" on a lock screen tells you nothing actionable.
+    alerts = alerts if alerts is not None else result.get("alerts") or []
+    if alerts:
+        icons = {"critical": "🚨", "warning": "⚠️", "info": "ℹ️"}
+        top = alerts[0]
+        head = f"{prefix}{icons.get(top['level'], '⚠️')} {top['title']}"
+        if top.get("detail"):
+            candidate = f"{head} ({top['detail']})"
+            if len(candidate) <= SERVERCHAN_TITLE_LIMIT:
+                head = candidate
+        if len(alerts) > 1:
+            more = f" +{len(alerts) - 1}项"
+            if len(head) + len(more) <= SERVERCHAN_TITLE_LIMIT:
+                head += more
+        return head
 
     score = result["risk_score"]
     level = result["risk_level"]

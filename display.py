@@ -343,6 +343,7 @@ class Dashboard:
     def render(self):
         self.console.print()
         self._header()
+        self._alert_panel()
         self._data_health()
         self._market_overview()
         self._risk_summary()
@@ -366,6 +367,31 @@ class Dashboard:
         subtitle = Text(f"更新时间: {now}", style="dim")
         content = Text.assemble(title, "\n", subtitle)
         self.console.print(Panel(content, border_style="cyan", expand=True))
+
+    # ------------------------------------------------------------------
+    # Alerts — what (if anything) made this run worth notifying about
+    # ------------------------------------------------------------------
+
+    def _alert_panel(self):
+        fired = self.r.get("alerts") or []
+        if not fired:
+            self.console.print(Panel("[green]无异常[/]",
+                                     title="[bold]🔔 异常检测[/]", border_style="green"))
+            return
+        styles = {"critical": "bold red", "warning": "yellow", "info": "cyan"}
+        icons = {"critical": "🚨", "warning": "⚠️", "info": "ℹ️"}
+        labels = {"event": "价格异动", "transition": "状态变化", "standing": "持续状态"}
+        lines = []
+        for a in fired:
+            st = styles[a["level"]]
+            detail = f" [dim]— {a['detail']}[/]" if a["detail"] else ""
+            tag = labels.get(a["category"], "")
+            lines.append(f"  [{st}]{icons[a['level']]} {a['title']}[/]{detail}"
+                         f"  [dim]({tag})[/]")
+        border = "red" if any(a["level"] == "critical" for a in fired) else "yellow"
+        self.console.print(Panel("\n".join(lines),
+                                 title=f"[bold]🔔 检测到 {len(fired)} 项异常[/]",
+                                 border_style=border))
 
     # ------------------------------------------------------------------
     # Data health — a broken pipeline must not render as a calm market
@@ -776,6 +802,7 @@ class MarkdownReport:
     def render(self):
         self.lines = []
         self._header()
+        self._alerts()
         self._data_health()
         self._market_overview()
         self._risk_summary()
@@ -802,6 +829,11 @@ class MarkdownReport:
     # ------------------------------------------------------------------
     # Data health
     # ------------------------------------------------------------------
+
+    def _alerts(self):
+        from alerts import render_alerts
+        for line in render_alerts(self.r.get("alerts") or []):
+            self._w(line)
 
     def _data_health(self):
         health = self.r.get("data_health") or {}
