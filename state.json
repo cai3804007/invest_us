@@ -1,10 +1,13 @@
 {
-  "date": "2026-09-01",
-  "risk_score": 15,
-  "risk_level": "中低风险",
+  "date": "2026-09-02",
+  "risk_score": 45,
+  "risk_level": "中等风险",
   "danger_ids": [
+    "COMBO_DXY_VIX",
+    "LEADERS_WEAK",
     "SOX_BELOW_MA50",
-    "US10Y_HIGH"
+    "SOX_WEAKER_QQQ",
+    "US10Y_STREAK_UP"
   ],
   "cycle": "expansion",
   "spy_above_ma200": true,
@@ -15,14 +18,14 @@
   },
   "weekly_cross": null,
   "drawdown_52w": {
-    "SPY": -1.3922477788171572,
-    "QQQ": -3.834604044575407
+    "SPY": -2.069724827078301,
+    "QQQ": -5.058204593722482
   },
   "position_actions": {
     "QQQM": "hold",
     "SPYM": "hold"
   },
-  "recommendation": "持有观望",
+  "recommendation": "谨慎持有",
   "last_fired": {
     "HEDGE_BROKEN": "2026-08-27",
     "CYCLE_SHIFT": "2026-08-27"
