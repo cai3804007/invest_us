@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from rich.console import Console
 from rich.table import Table
@@ -349,6 +350,7 @@ class Dashboard:
         self._risk_summary()
         self._cycle_panel()
         self._position_panel()
+        self._mag7_panel()
         self._rebalance_panel()
         self._indicator_tables()
         self._leader_table()
@@ -657,6 +659,50 @@ class Dashboard:
                                  border_style=border))
 
     # ------------------------------------------------------------------
+    # 七姐妹估值
+    # ------------------------------------------------------------------
+
+    def _mag7_panel(self):
+        mag7 = self.r.get("mag7") or {}
+        if not mag7:
+            return
+        t = Table(title="🏢 七姐妹 估值与基本面", show_header=True,
+                  header_style="bold magenta", expand=True, padding=(0, 1))
+        for col, just in [("标的", "left"), ("现价", "right"), ("买入价", "right"),
+                          ("距买入", "right"), ("PE", "right"), ("自身分位", "right"),
+                          ("营收", "right"), ("盈利", "right"),
+                          ("基本面", "center"), ("结论", "left")]:
+            t.add_column(col, justify=just)
+        styles = {"buy": "bold green", "trim": "yellow", "sell": "bold red",
+                  "warn": "bold yellow", "hold": "dim"}
+        for tk, r in mag7.items():
+            pct = r.get("pe_pctile")
+            pct_s = f"{pct*100:.0f}%" if pct is not None else "N/A"
+            if pct is not None:
+                pct_s = (f"[green]{pct_s}[/]" if pct <= 0.25
+                         else f"[red]{pct_s}[/]" if pct >= 0.75 else pct_s)
+            rev = r.get("rev_growth"); eps = r.get("eps_growth")
+            st = styles.get(r.get("level"), "")
+            tb = r.get("to_buy_pct")
+            if tb is None:
+                tb_s = "N/A"
+            elif tb >= 0:
+                tb_s = f"[bold green]已到位[/]"
+            else:
+                tb_s = f"{tb:.0f}%"
+            t.add_row(tk,
+                      f"${r['price']:,.1f}" if r.get("price") else "N/A",
+                      f"${r['target_buy']:,.1f}" if r.get("target_buy") else "N/A",
+                      tb_s,
+                      _fmt(r.get("pe_ttm"), 1), pct_s,
+                      f"{rev*100:+.0f}%" if rev is not None else "N/A",
+                      f"{eps*100:+.0f}%" if eps is not None else "N/A",
+                      {"strong": "[green]强[/]", "ok": "中",
+                       "weak": "[red]弱[/]"}.get(r.get("quality"), "—"),
+                      f"[{st}]{r.get('verdict','')}[/{st}]" if st else r.get("verdict", ""))
+        self.console.print(t)
+
+    # ------------------------------------------------------------------
     # Indicator tables
     # ------------------------------------------------------------------
 
@@ -803,12 +849,15 @@ class MarkdownReport:
         self.lines = []
         self._header()
         self._alerts()
+        self._summary()
         self._data_health()
         self._market_overview()
         self._risk_summary()
         self._cycle_section()
         self._position_section()
         self._rebalance_section()
+        self._mag7_section()
+        self._institutional_section()
         self._ai_section()
         self._indicator_guide()
         self._leader_table()
@@ -834,6 +883,118 @@ class MarkdownReport:
         from alerts import render_alerts
         for line in render_alerts(self.r.get("alerts") or []):
             self._w(line)
+
+    def _summary(self):
+        """各模块一行速览。
+
+        推送到手机上的报告有 350+ 行，全读完不现实。这一节的存在是让你
+        在锁屏页扫一眼就知道"今天有没有事、哪个模块有事"，细节再往下翻。
+        每个模块只给结论，不给过程。
+        """
+        r = self.r
+        rows = []
+
+        # 综合评估
+        dangers = r.get("danger_count", 0)
+        rows.append(("🎯 综合", f"风险 {r['risk_score']}/{MAX_RISK_POSITIVE} · "
+                                f"{r['risk_level'].split('（')[0]} · "
+                                f"危险信号 {dangers} 项 · **{r['recommendation']}**"))
+
+        # 经济周期
+        cyc = r.get("economic_cycle") or {}
+        if cyc.get("cycle_cn"):
+            rows.append(("🔄 周期", f"{cyc['cycle_cn']} · 扩张 {cyc.get('expansion_score')}"
+                                    f"/衰退 {cyc.get('recession_score')} · "
+                                    f"{cyc.get('inflation_label','')}"))
+
+        # 加仓标的
+        pos = r.get("position_signals") or {}
+        if pos:
+            bits = [f"{k} {v.get('action','')}" for k, v in pos.items()]
+            rows.append(("📊 加仓信号", " · ".join(bits)))
+
+        # 七姐妹
+        mag7 = r.get("mag7") or {}
+        if mag7:
+            cheap = [k for k, v in mag7.items() if v.get("level") == "buy"]
+            trim = [k for k, v in mag7.items() if v.get("level") == "trim"]
+            sell = [k for k, v in mag7.items() if v.get("level") == "sell"]
+            trap = [k for k, v in mag7.items() if v.get("level") == "warn"]
+            bits = []
+            if cheap:
+                bits.append(f"偏低 {'/'.join(cheap)}")
+            if trim:
+                bits.append(f"偏高 {'/'.join(trim)}")
+            # 估值高 + 基本面转弱，和单纯估值高不是一回事，分开列
+            if sell:
+                bits.append(f"⚠️偏高且基本面弱 {'/'.join(sell)}")
+            if trap:
+                bits.append(f"⚠️价值陷阱 {'/'.join(trap)}")
+            rows.append(("🏢 七姐妹", " · ".join(bits) or "均为中性"))
+
+            # 已到买入价的，带上目标价与现价的差距
+            hit = [(k, v) for k, v in mag7.items()
+                   if v.get("to_buy_pct") is not None and v["to_buy_pct"] >= 0]
+            if hit:
+                hit.sort(key=lambda x: -x[1]["to_buy_pct"])   # 折价最多的在前
+                bits = []
+                for k, v in hit:
+                    buy = v.get("target_buy")
+                    bits.append(f"{k} ${buy:,.0f}" if buy else k)
+                rows.append(("💰 已到买入价", " · ".join(bits)))
+
+        # 机构
+        inst = r.get("institutional") or {}
+        f13, insiders = inst.get("f13") or {}, inst.get("insiders") or {}
+        if f13:
+            def _names(items, with_pct=False, limit=4):
+                """列出标的代码；代码缺失时退回公司名。超出上限标'等N只'。"""
+                if not items:
+                    return None
+                shown = []
+                for x in items[:limit]:
+                    tag = x.get("ticker") or x["name"][:10]
+                    if with_pct and "pct" in x:
+                        tag += f"{x['pct']:+.0f}%"
+                    shown.append(tag)
+                extra = len(items) - limit
+                return "/".join(shown) + (f" 等{len(items)}只" if extra > 0 else "")
+
+            for name, v in f13.items():
+                parts = []
+                for key, label, pct in (("new", "建仓", False), ("added", "增持", True),
+                                        ("trimmed", "减持", True), ("exited", "清仓", False)):
+                    s = _names(v.get(key) or [], with_pct=pct)
+                    if s:
+                        parts.append(f"{label} {s}")
+                body = " · ".join(parts) if parts else "无变化"
+                rows.append(("🏛️ " + name,
+                             f"{body} · 数据 {v.get('position_age_days')} 天前"))
+        buyers = [k for k, v in insiders.items() if v.get("buys")]
+        if buyers:
+            rows.append(("👤 内部人买入", "/".join(buyers)))
+
+        # 再平衡
+        reb = r.get("rebalance") or {}
+        if reb.get("needed") is not None:
+            rows.append(("⚖️ 再平衡", "需要调整" if reb.get("needed") else "无需调整"))
+
+        # AI 研判取首句 —— 完整段落在下面的 AI 章节，这里只要一个抓手
+        if self.ai_summary:
+            first = re.split(r"[。！？\n]", self.ai_summary.strip(), maxsplit=1)[0]
+            if first:
+                rows.append(("🤖 AI 研判", first.strip()[:80] + "。"))
+
+        if not rows:
+            return
+
+        self._w("## 📋 模块速览")
+        self._w()
+        for label, text in rows:
+            self._w(f"- **{label}**：{text}")
+        self._w()
+        self._w("---")
+        self._w()
 
     def _data_health(self):
         health = self.r.get("data_health") or {}
@@ -1034,6 +1195,151 @@ class MarkdownReport:
             self._w(f"| {icons.get(r['status'], '⚪')} {r['label']} | {r['current']:.1f}% | "
                     f"{r['target']:.1f}% | {r['deviation']:+.1f}pp | {trade} | {r['reason']} |")
         self._w()
+
+    def _mag7_section(self):
+        mag7 = self.r.get("mag7") or {}
+        if not mag7:
+            return
+        icons = {"buy": "🟢", "trim": "🟡", "sell": "🔴", "warn": "⚠️", "hold": "⚪"}
+        self._w("## 🏢 七姐妹 估值与基本面")
+        self._w()
+        self._w("| 标的 | 现价 | 建议买入价 | 距买入 | 深度价值价 | PE(TTM) | 自身分位 | 基本面 | 结论 |")
+        self._w("|------|-----:|----------:|------:|----------:|--------:|--------:|:------:|------|")
+        for tk, r in mag7.items():
+            price = f"${r['price']:,.1f}" if r.get("price") else "N/A"
+            buy = f"${r['target_buy']:,.1f}" if r.get("target_buy") else "N/A"
+            deep = f"${r['target_deep']:,.1f}" if r.get("target_deep") else "N/A"
+            tb = r.get("to_buy_pct")
+            if tb is None:
+                tb_s = "N/A"
+            elif tb >= 0:
+                tb_s = f"**已到位 +{tb:.0f}%**"
+            else:
+                tb_s = f"还需 {tb:.0f}%"
+            pe = _md_val(r.get("pe_ttm"), 1)
+            pct = f"{r['pe_pctile']*100:.0f}%" if r.get("pe_pctile") is not None else "N/A"
+            q = {"strong": "强", "ok": "中", "weak": "弱"}.get(r.get("quality"), "—")
+            icon = icons.get(r.get("level"), "")
+            self._w(f"| **{tk}** | {price} | {buy} | {tb_s} | {deep} | {pe} | {pct} | {q} | "
+                    f"{icon} {r.get('verdict', '')} |")
+        self._w()
+        self._w("> **建议买入价**（相对估值法）：目标价 = 当前 TTM EPS × 该股自身近6年 PE 分布的 25% 分位。")
+        has_intrinsic = any((r.get("intrinsic") or {}).get("median") for r in mag7.values())
+        self._w("> 理论依据是**倍数均值回归** —— 假设 PE 会回到自身历史中枢。这是统计规律，不是估值理论，")
+        self._w("> 它没有成长调整、没有利率调整、也没有内在价值概念。"
+                + ("所以下面用四套绝对估值法交叉验证。" if has_intrinsic
+                   else "（本次绝对估值数据不足，无交叉验证）"))
+        self._w(">")
+        self._w("> 估值分位是**自身**比较，不是跨公司比较；分位低但基本面弱 = 价值陷阱，不作买入提示。")
+        self._w()
+
+        # 绝对估值：多理论交叉验证
+        if has_intrinsic:
+            self._w("### 📐 内在价值：四套经典理论交叉验证")
+            self._w()
+            self._w("| 标的 | 现价 | 两阶段DCF | PEG(Lynch) | FCF收益率 | 格雷厄姆 | 中位 | 区间分歧 |")
+            self._w("|------|-----:|---------:|----------:|---------:|--------:|-----:|:-------:|")
+            agree_label = {"tight": "✅ 一致", "loose": "🟡 中等", "unusable": "❌ 过大"}
+            for tk, r in mag7.items():
+                it = r.get("intrinsic") or {}
+                m = it.get("models") or {}
+                cell = lambda k: f"${m[k]:,.0f}" if m.get(k) else "—"
+                med = f"${it['median']:,.0f}" if it.get("median") else "—"
+                disp = it.get("dispersion")
+                ag = agree_label.get(it.get("agreement"), "—")
+                if disp:
+                    ag += f" {disp:.1f}x"
+                price = f"${r['price']:,.0f}" if r.get("price") else "N/A"
+                self._w(f"| **{tk}** | {price} | {cell('dcf')} | {cell('peg')} | "
+                        f"{cell('fcf')} | {cell('graham')} | {med} | {ag} |")
+            self._w()
+            self._w("**各方法的理论来源与适用性：**")
+            self._w()
+            self._w("| 方法 | 来源 | 核心假设 | 对科技股适配度 |")
+            self._w("|------|------|---------|--------------|")
+            self._w("| 两阶段DCF | Williams(1938) 股利贴现→自由现金流贴现 | 企业价值=未来自由现金流现值 | 高，但对输入极敏感 |")
+            self._w("| PEG | Peter Lynch《One Up on Wall Street》 | 合理PE ≈ 盈利增速 | 中，增速为负时失效 |")
+            self._w("| FCF收益率 | Buffett \"owner earnings\" | 现金流收益率应高于无风险利率+溢价 | 高 |")
+            self._w("| 格雷厄姆 | Graham《Security Analysis》 | V = EPS×(8.5+2g)，按利率调整 | **低**，为重资产工业企业设计 |")
+            self._w()
+            self._w("> **现金流口径**：不用 yfinance 的 `freeCashflow` 字段（与现金流量表对不上，")
+            self._w("> MSFT 实测 16.5B vs 报表 67.0B），改用 Buffett 的 owner earnings ≈ 经营现金流 − 折旧。")
+            self._w("> 原因是当期 FCF 会被资本开支周期扭曲：MSFT 资本开支 3 年从 28B 增至 116B（AI数据中心），")
+            self._w("> 用它做永续贴现会算出只有股价 1/10 的内在价值 —— 那不是便宜，是模型用错了输入。")
+            self._w(">")
+            self._w("> **区间分歧 > 5x 时中位数不可用** —— 说明这几套理论对该公司的假设根本不兼容，")
+            self._w("> 通常出现在高成长、盈利波动大或重资本开支的标的上。分歧度本身就是信息。")
+            self._w()
+
+    def _institutional_section(self):
+        inst = self.r.get("institutional") or {}
+        f13, insiders = inst.get("f13") or {}, inst.get("insiders") or {}
+        if not f13 and not insiders:
+            return
+
+        self._w("## 🏛️ 机构与内部人动向")
+        self._w()
+
+        for name, r in f13.items():
+            age = r.get("position_age_days")
+            self._w(f"### {name} 13F（报告期 {r.get('period')}，申报 {r.get('filed')}）")
+            self._w()
+            self._w(f"> ⚠️ **这份持仓是 {age} 天前的状态。**13F 规则允许季末后 45 天申报，")
+            self._w("> 你看到时交易往往已过去 2-4 个月，股价通常已反映。**当认知参考，不是交易信号。**")
+            self._w()
+            self._w(f"持仓 {r.get('positions')} 只，总市值 ${r.get('total_value',0)/1e9:,.0f}B")
+            self._w()
+            money = lambda v: f"${v/1e9:.2f}B" if v >= 1e9 else f"${v/1e6:.0f}M"
+            for label, key, icon in [("🆕 新建仓", "new", ""), ("📈 增持", "added", ""),
+                                     ("📉 减持", "trimmed", ""), ("❌ 清仓", "exited", "")]:
+                items = r.get(key) or []
+                if not items:
+                    continue
+                self._w(f"**{label}**")
+                for it in items[:6]:
+                    pct = f" {it['pct']:+.0f}%" if "pct" in it else ""
+                    self._w(f"- {it['name']}{pct} — {money(it['value'])}")
+                self._w()
+
+        watch = (inst.get("prices") or {})
+        new_pos = [(name, it) for name, r in f13.items() for it in (r.get("new") or [])
+                   if it.get("cost_est")]
+        if new_pos:
+            self._w("### 💰 新建仓的估算成本")
+            self._w()
+            self._w("| 标的 | 建仓人 | 建仓季区间 | 估算成本(VWAP) | 现价 | 距成本 |")
+            self._w("|------|--------|----------:|-------------:|-----:|------:|")
+            for name, it in new_pos:
+                e, tk = it["cost_est"], it.get("ticker") or "?"
+                cur = watch.get(tk)
+                gap = f"{(cur/e['vwap']-1)*100:+.1f}%" if cur else "—"
+                self._w(f"| **{tk}** | {name} | ${e['low']:.2f}~${e['high']:.2f} | "
+                        f"${e['vwap']:.2f} | {f'${cur:.2f}' if cur else '—'} | {gap} |")
+            self._w()
+            self._w("> ⚠️ **13F 不披露成交价，也不披露成交日期。**「估算成本」是建仓所在季度的")
+            self._w("> 成交量加权均价(VWAP)，真实成交价只能确定落在该季度区间内的某处。")
+            self._w("> 股价回落到估算成本 +3% 以内时会推送提醒。")
+            self._w()
+
+        if insiders:
+            self._w("### 内部人交易 Form 4（滞后仅 1-5 天）")
+            self._w()
+            self._w("| 标的 | 买入 | 卖出 |")
+            self._w("|------|------|------|")
+            for tk, r in insiders.items():
+                b = (f"🟢 {r['buyers']}人 ${r['buy_value']/1e6:.1f}M"
+                     if r["buys"] else "—")
+                s = (f"{r['sellers']}人 ${r['sell_value']/1e6:.1f}M"
+                     if r["sells"] else "—")
+                self._w(f"| **{tk}** | {b} | {s} |")
+            self._w()
+            self._w("> 只统计交易代码 **P（公开市场买入）/ S（卖出）**，已过滤股权授予、")
+            self._w("> 期权行权、缴税扣股等薪酬机制产生的记录。")
+            self._w(">")
+            self._w("> **买卖不对称**：内部人买入在学术研究中有一定预测力（多人同期买入尤其），")
+            self._w("> 因为没人会在预期下跌时自掏腰包买自家股票；而卖出信号弱得多 —— 高管持股")
+            self._w("> 多来自股权激励，卖出常常只是分散化或缴税，与看空无关。")
+            self._w()
 
     def _ai_section(self):
         if not self.ai_summary:

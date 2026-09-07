@@ -81,6 +81,98 @@ YAHOO_TICKERS = {
 
 LEADING_STOCKS = ["NVDA", "MSFT", "META", "AMZN", "AAPL", "GOOGL", "TSLA"]
 
+# ------------------------------------------------------------------
+# 七姐妹基本面与估值（fundamentals.py）
+#
+# 估值判断用**自身历史分位**而非固定 PE 阈值：跨公司 PE 不可比
+# （NVDA 的 30 倍和 AAPL 的 30 倍不是一回事），同一公司的 PE 中枢
+# 也会随成长阶段漂移。和 SKEW 的处理思路一致。
+# ------------------------------------------------------------------
+MAG7_TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA"]
+
+FUND_CACHE_FILE = os.environ.get("FUND_CACHE_FILE", ".fundamentals_cache.json")
+FUND_CACHE_DAYS = 7          # 基本面按季度变，一周刷一次足够；PE 每次用现价重算
+
+VAL_HISTORY_YEARS = 6        # yfinance 的 EPS 历史约到 2014，取 6 年兼顾样本量与时效
+VAL_PCTILE_CHEAP = 0.25      # PE 处于自身近6年分布的 25% 分位以下 = 偏低
+VAL_PCTILE_EXPENSIVE = 0.75  # 75% 分位以上 = 偏高
+
+# ------------------------------------------------------------------
+# 多锚点估值模型参数（valuation_models.py）
+#
+# 这些是**理论模型的输入假设**，不是拍脑袋的阈值。改动它们会显著
+# 改变估值结果 —— 尤其是 DCF_ERP 和 DCF_TERMINAL_GROWTH，两者各变
+# 1pp 可以让 DCF 结果变动 30% 以上。
+# ------------------------------------------------------------------
+
+# 两阶段 DCF
+DCF_YEARS = 10               # 第一阶段年数
+DCF_TERMINAL_GROWTH = 0.025  # 永续增长，取长期名义GDP增速量级（不应超过它）
+DCF_ERP = 0.05               # 股权风险溢价（Damodaran 长期美股估计约 4.5-5.5%）
+DCF_MIN_DISCOUNT = 0.07      # 折现率下限，防止低beta+低利率算出发散估值
+DCF_MAX_GROWTH = 0.35        # 初始增速上限，避免把一次性暴增外推
+DCF_GROWTH_FADE = 0.80       # 增速每年向永续增长收敛的保留比例
+
+# FCF 收益率法：要求收益率 = 无风险利率 + 此溢价
+FCF_REQUIRED_PREMIUM = 0.04
+
+# PEG：Lynch 认为 PEG=1 为合理，<1 便宜
+PEG_FAIR = 1.0
+
+# 模型分歧度闸门：各模型估值的 最大/最小 比值
+# 超过 DISPERSION_UNUSABLE 时，中位数不该被当作参考价 —— 说明这几套
+# 理论对这家公司的假设根本不兼容（通常是高成长/无盈利/重资本开支）
+DISPERSION_TIGHT = 2.5
+DISPERSION_UNUSABLE = 5.0
+
+# 格雷厄姆成长公式 V = EPS × (8.5 + 2g) × 4.4 / Y
+GRAHAM_BASE_PE = 8.5         # 零增长企业的基准 PE
+GRAHAM_NORM_YIELD = 4.4      # 原式标定的 AAA 公司债收益率(%)
+
+# ------------------------------------------------------------------
+# SEC 机构持仓与内部人交易监控（institutional.py）
+#
+# 时效性差异必须记住：
+#   13F   季末+45天申报 -> 实际滞后 60~135 天，只能当认知参考
+#   Form4 交易后2工作日 -> 滞后 1~5 天，时效性可用
+# ------------------------------------------------------------------
+
+# SEC 要求 User-Agent 带真实联系方式，否则封禁
+SEC_USER_AGENT = os.environ.get(
+    "SEC_USER_AGENT", "invest-us-monitor contact@example.com")
+SEC_CACHE_FILE = os.environ.get("SEC_CACHE_FILE", ".sec_cache.json")
+
+# 跟踪的 13F 申报人（CIK 十位补零）
+F13_INVESTORS = {
+    "伯克希尔": "0001067983",       # Berkshire Hathaway (巴菲特)
+}
+
+# 内部人交易跟踪的标的：只能是**个股**。
+# ETF（QQQM/SPY 等）没有内部人，不会有 Form 4 申报 —— 放进来会每次
+# 运行都产生一条"无法解析 CIK"的错误。
+INSIDER_TICKERS = list(MAG7_TICKERS)
+
+INSIDER_LOOKBACK_DAYS = 45      # 回看窗口
+INSIDER_MIN_VALUE = 500_000     # 单笔金额门槛，滤掉零星小额
+F13_MIN_CHANGE_PCT = 10.0       # 13F 持仓变动超过此比例才算增/减持
+
+# 股价回落到机构估算建仓成本的多少范围内时提醒。
+# 注意 13F 不披露成交价，"成本"是建仓季度 VWAP 的估算值，不是真实成交价。
+COST_ALERT_BUFFER_PCT = 3.0
+
+# Form 4 缓存条目上限。每天新增申报会累积，不设上限文件会无限增长。
+SEC_CACHE_MAX_FORM4 = 400
+
+# 基本面质量门槛。低估值 + 基本面转弱 = 价值陷阱，不给买入提示。
+QUALITY_LEVELS = {
+    "REV_STRONG": 0.15,      # 营收同比 >=15%
+    "REV_WEAK": 0.05,        # <5% 视为放缓
+    "EPS_STRONG": 0.15,
+    "MARGIN_STRONG": 0.20,   # 净利率 >=20%
+    "MARGIN_WEAK": 0.08,
+    "ROE_STRONG": 0.20,
+}
+
 FRED_SERIES = {
     "TIPS": "DFII10",
     "T10Y2Y": "T10Y2Y",
@@ -290,6 +382,7 @@ ALERT_MUTE = {
         "CYCLE_SHIFT",     # 周期切换影响的是资产配置，不是本月买不买
         "NEW_DANGER",
         "HEDGE_BROKEN",
+        # 注意：MAG7_* 不静音 —— 个股估值提示正是"想把握买点"的用法所需
     },
 }
 

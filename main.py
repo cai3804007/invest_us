@@ -55,9 +55,14 @@ def main():
     try:
         console = Console(stderr=True) if is_markdown else Console()
 
+        # 0. 先读上次状态：机构建仓成本观察名单里的标的需要一并取价，
+        #    这些票通常不在主行情列表中
+        prev_state = alert_mod.load_state()
+        watch_tickers = list((prev_state.get("inst_watch") or {}).keys())
+
         # 1. Fetch market data
         fetcher = MarketDataFetcher()
-        fetcher.fetch_all(console=console)
+        fetcher.fetch_all(console=console, watch_tickers=watch_tickers)
 
         # 2. Fetch real-time news
         news_fetcher = NewsFetcher()
@@ -75,7 +80,6 @@ def main():
                           f"{', '.join(health['missing_critical'])} — 本次不给出操作建议[/]")
 
         # 4. Detect anomalies against the previous run
-        prev_state = alert_mod.load_state()
         engine = alert_mod.AlertEngine(result, prev_state)
         fired = engine.run()
         result["alerts"] = fired

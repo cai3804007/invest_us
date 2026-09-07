@@ -61,6 +61,9 @@ jobs:
       # 报警侧重：accumulate = 长期持有+逢跌加码（静音战术噪音，加密回撤档位）
       #           tactical   = 完整风险监控
       ALERT_PROFILE: ${{ vars.ALERT_PROFILE || 'accumulate' }}
+      # SEC 强制要求 User-Agent 含真实可达邮箱，否则 www.sec.gov/Archives 返回 403。
+      # 本仓库是公开的，所以放 Secret 而不是硬编码 —— 明文邮箱会被爬虫抓去发垃圾邮件。
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
 
     steps:
       - name: Checkout
@@ -73,6 +76,19 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      # SEC / 基本面缓存跨运行复用。没有它每次都是冷启动：
+      # 约 90 次 SEC 请求、运行时间 54s（有缓存约 11s）。
+      # 缓存内容都是可重新获取的公开数据，丢失只是变慢，不影响正确性。
+      - name: Restore data caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            .sec_cache.json
+            .fundamentals_cache.json
+          key: data-cache-${{ github.run_id }}
+          restore-keys: |
+            data-cache-
 
       - name: Determine report type
         id: report_type
