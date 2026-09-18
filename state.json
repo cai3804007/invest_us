@@ -1,5 +1,5 @@
 {
-  "date": "2026-09-17",
+  "date": "2026-09-18",
   "risk_score": 15,
   "risk_level": "中低风险",
   "danger_ids": [
@@ -15,8 +15,8 @@
   },
   "weekly_cross": null,
   "drawdown_52w": {
-    "SPY": -3.06345669515361,
-    "QQQ": -5.449977541965001
+    "SPY": -1.9643170156015133,
+    "QQQ": -3.8131409598936794
   },
   "position_actions": {
     "QQQM": "hold",
