@@ -1,9 +1,8 @@
 {
-  "date": "2026-09-18",
-  "risk_score": 15,
-  "risk_level": "中低风险",
+  "date": "2026-09-19",
+  "risk_score": -10,
+  "risk_level": "低风险 (Risk-On)",
   "danger_ids": [
-    "SOX_BELOW_MA50",
     "US10Y_HIGH"
   ],
   "cycle": "expansion",
@@ -15,8 +14,8 @@
   },
   "weekly_cross": null,
   "drawdown_52w": {
-    "SPY": -1.9643170156015133,
-    "QQQ": -3.8131409598936794
+    "SPY": -1.8381500134859619,
+    "QQQ": -3.2053614310579293
   },
   "position_actions": {
     "QQQM": "hold",
