@@ -1,6 +1,7 @@
 import yfinance as yf
 import pandas as pd
 import requests
+import time
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import (YAHOO_TICKERS, LEADING_STOCKS, FRED_SERIES, FRED_API_KEY,
@@ -15,15 +16,19 @@ class MarketDataFetcher:
         self.fear_greed = None
         self.fear_greed_label = ""
         self.valuation = {}
+        self.fundamentals = {}
+        self.institutional = {}
         self._errors = []
 
-    def fetch_all(self, console=None):
+    def fetch_all(self, console=None, watch_tickers=None):
         if console:
             console.print("[bold cyan]正在获取市场数据...[/]")
         self._fetch_yahoo(console)
         self._fetch_fred(console)
         self._fetch_fear_greed(console)
         self._fetch_valuation(console)
+        self._fetch_fundamentals(console)
+        self._fetch_institutional(console, watch_tickers)
         if console and self._errors:
             for err in self._errors:
                 console.print(f"  [yellow]{err}[/]")
@@ -88,26 +93,41 @@ class MarketDataFetcher:
     # FRED
     # ------------------------------------------------------------------
 
-    def _fetch_one_fred(self, series_id, start_str, end_str):
+    def _fetch_one_fred(self, series_id, start_str, end_str, attempts=2):
         """Return (df, error). Values are left in FRED's native unit here;
-        scaling happens in _fetch_fred so the mapping stays in one place."""
-        try:
-            resp = requests.get(
-                "https://api.stlouisfed.org/fred/series/observations",
-                params={
-                    "series_id": series_id,
-                    "api_key": FRED_API_KEY,
-                    "file_type": "json",
-                    "observation_start": start_str,
-                    "observation_end": end_str,
-                    "sort_order": "asc",
-                },
-                timeout=15,
-            )
-            data = resp.json()
+        scaling happens in _fetch_fred so the mapping stays in one place.
+
+        FRED 偶发返回非 JSON 的响应体（实测 UNRATE 报 JSONDecodeError）。
+        单次失败就放弃会让周期评分静默少一项指标，所以重试一次。
+        """
+        last_err = None
+        for attempt in range(attempts):
+            if attempt:
+                time.sleep(0.6)
+            try:
+                resp = requests.get(
+                    "https://api.stlouisfed.org/fred/series/observations",
+                    params={
+                        "series_id": series_id,
+                        "api_key": FRED_API_KEY,
+                        "file_type": "json",
+                        "observation_start": start_str,
+                        "observation_end": end_str,
+                        "sort_order": "asc",
+                    },
+                    timeout=15,
+                )
+                data = resp.json()
+            except Exception as e:
+                last_err = f"{type(e).__name__}: {e}"
+                continue
             if "observations" not in data:
                 detail = data.get("error_message", f"HTTP {resp.status_code}")
                 return None, str(detail)
+            break
+        else:
+            return None, f"{last_err}（重试 {attempts} 次后仍失败）"
+        try:
             rows = [{"date": o["date"], "value": float(o["value"])}
                     for o in data["observations"] if o["value"] != "."]
             if not rows:
@@ -198,6 +218,31 @@ class MarketDataFetcher:
                     self._errors.append(f"估值: {name} 无 trailingPE")
             except Exception as e:
                 self._errors.append(f"估值: {name} 失败 ({type(e).__name__}: {e})")
+
+    # ------------------------------------------------------------------
+    # 七姐妹基本面（带缓存，按季度更新）
+    # ------------------------------------------------------------------
+
+    def _fetch_fundamentals(self, console=None):
+        import fundamentals
+        data, errors = fundamentals.fetch_fundamentals(console=console)
+        self.fundamentals = data
+        self._errors.extend(errors)
+
+    # ------------------------------------------------------------------
+    # SEC 13F / Form 4
+    # ------------------------------------------------------------------
+
+    def _fetch_institutional(self, console=None, watch_tickers=None):
+        import institutional
+        try:
+            data, errors = institutional.collect(console=console,
+                                                 watch_tickers=watch_tickers)
+            self.institutional = data
+            self._errors.extend(errors)
+        except Exception as e:
+            # SEC 不可用不该拖垮整个运行
+            self._errors.append(f"SEC 数据获取失败 ({type(e).__name__}: {e})")
 
     # ------------------------------------------------------------------
     # Helper accessors

@@ -228,6 +228,8 @@ class MarketAnalyzer:
 
         cycle_result = self._detect_economic_cycle()
         position_signals = self._analyze_position_targets()
+        mag7 = self._analyze_mag7()
+        inst = getattr(self.f, "institutional", None) or {}
         # Inert unless the user supplies a portfolio file — see rebalance.py.
         rebalance_result = rebalance.analyse(cycle_result["allocation"])
 
@@ -244,6 +246,8 @@ class MarketAnalyzer:
             "combos": self.combos,
             "economic_cycle": cycle_result,
             "position_signals": position_signals,
+            "mag7": mag7,
+            "institutional": inst,
             "data_health": self.data_health,
             "price_action": {
                 "streaks": self.indicators.get("DOWN_STREAKS", {}),
@@ -1501,6 +1505,20 @@ class MarketAnalyzer:
             "allocation": allocation,
             "allocation_caveats": alloc_caveats,
         }
+
+    # ------------------------------------------------------------------
+    # 七姐妹：估值分位 + 基本面质量
+    # ------------------------------------------------------------------
+
+    def _analyze_mag7(self):
+        import fundamentals
+        data = getattr(self.f, "fundamentals", None) or {}
+        if not data:
+            return {}
+        # 无风险利率用 10Y 美债（US10Y 已是百分数，模型要小数）
+        us10y = self.indicators.get("US10Y")
+        rf = us10y / 100.0 if us10y is not None else None
+        return fundamentals.analyse(data, lambda tk: self.f.get_series(tk), risk_free=rf)
 
     # ------------------------------------------------------------------
     # Position-target signal analysis (QQQM / SPYM)
