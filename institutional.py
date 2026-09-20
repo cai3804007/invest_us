@@ -28,6 +28,7 @@ Form 4 不同：
 import json
 import os
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
@@ -41,6 +42,10 @@ from config import (SEC_USER_AGENT, SEC_CACHE_FILE, F13_INVESTORS,
 
 _SEC_MIN_INTERVAL = 0.12          # SEC 限速 10 次/秒，留余量
 _last_call = [0.0]
+# 内部人交易用 3 个线程并发抓取，限速器必须加锁：无锁时三个线程会同时
+# 读到相同的 _last_call、一起 sleep、再一起发请求，实测退化成 98 次/秒
+# （SEC 上限 10 次/秒）。GitHub Actions 出口 IP 是共享的，被封会连累别人。
+_rate_lock = threading.Lock()
 
 _EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}")
 
@@ -74,11 +79,16 @@ def validate_user_agent(ua):
 
 
 def _get(url, timeout=20):
-    """带限速的 SEC 请求。超限会被封 IP，这不是可以省的东西。"""
-    wait = _SEC_MIN_INTERVAL - (time.time() - _last_call[0])
-    if wait > 0:
-        time.sleep(wait)
-    _last_call[0] = time.time()
+    """带限速的 SEC 请求。超限会被封 IP，这不是可以省的东西。
+
+    sleep 必须在锁内：放到锁外会让多个线程同时醒来再一起发请求，
+    等于没限速。
+    """
+    with _rate_lock:
+        wait = _SEC_MIN_INTERVAL - (time.time() - _last_call[0])
+        if wait > 0:
+            time.sleep(wait)
+        _last_call[0] = time.time()
     return requests.get(url, headers={"User-Agent": SEC_USER_AGENT}, timeout=timeout)
 
 
@@ -421,16 +431,23 @@ def _parse_form4(cik, accession):
     return []
 
 
+_map_lock = threading.Lock()
+
+
 def _cik_for(ticker, cache):
     key = f"cik:{ticker}"
     if key in cache:
         return cache[key]
     if "ticker_map" not in cache:
-        r = _get("https://www.sec.gov/files/company_tickers.json")
-        if r.status_code != 200:
-            return None
-        cache["ticker_map"] = {v["ticker"]: str(v["cik_str"]).zfill(10)
-                               for v in r.json().values()}
+        # 加锁：3 个线程并发时"检查后填充"会让每个线程各拉一次
+        # 约 1MB 的全量映射表。双重检查避免拿到锁后重复拉取。
+        with _map_lock:
+            if "ticker_map" not in cache:
+                r = _get("https://www.sec.gov/files/company_tickers.json")
+                if r.status_code != 200:
+                    return None
+                cache["ticker_map"] = {v["ticker"]: str(v["cik_str"]).zfill(10)
+                                       for v in r.json().values()}
     cik = cache["ticker_map"].get(ticker.upper())
     if cik:
         cache[key] = cik
