@@ -1,5 +1,5 @@
 {
-  "date": "2026-09-19",
+  "date": "2026-09-22",
   "risk_score": -10,
   "risk_level": "低风险 (Risk-On)",
   "danger_ids": [
@@ -14,8 +14,39 @@
   },
   "weekly_cross": null,
   "drawdown_52w": {
-    "SPY": -1.8381500134859619,
-    "QQQ": -3.2053614310579293
+    "SPY": -0.3161512935710875,
+    "QQQ": -0.4156832147808043
+  },
+  "mag7_levels": {
+    "AAPL": "trim",
+    "MSFT": "buy",
+    "GOOGL": "buy",
+    "AMZN": "buy",
+    "NVDA": "buy",
+    "META": "hold",
+    "TSLA": "sell"
+  },
+  "f13_filed": {
+    "伯克希尔": "2026-08-14"
+  },
+  "inst_watch": {
+    "DHI": {
+      "investor": "伯克希尔",
+      "period": "2026-06-30",
+      "vwap": 148.47816423131664,
+      "low": 131.59842854423437,
+      "high": 170.28252016433876,
+      "alerted": true,
+      "last_price": 139.25
+    }
+  },
+  "mag7_price_tier": {
+    "AAPL": null,
+    "MSFT": "buy",
+    "GOOGL": "deep",
+    "AMZN": "deep",
+    "NVDA": "deep",
+    "TSLA": null
   },
   "position_actions": {
     "QQQM": "hold",
@@ -24,6 +55,19 @@
   "recommendation": "持有观望",
   "last_fired": {
     "HEDGE_BROKEN": "2026-08-27",
-    "CYCLE_SHIFT": "2026-08-27"
+    "CYCLE_SHIFT": "2026-08-27",
+    "MAG7_PRICE_DEEP_GOOGL": "2026-09-22",
+    "MAG7_PRICE_DEEP_AMZN": "2026-09-22",
+    "MAG7_PRICE_DEEP_NVDA": "2026-09-22",
+    "MAG7_BUY_MSFT": "2026-09-22",
+    "MAG7_BUY_GOOGL": "2026-09-22",
+    "MAG7_BUY_AMZN": "2026-09-22",
+    "MAG7_BUY_NVDA": "2026-09-22",
+    "MAG7_SELL_TSLA": "2026-09-22",
+    "MAG7_PRICE_BUY_MSFT": "2026-09-22",
+    "F13_NEW_伯克希尔_DHI": "2026-09-22",
+    "COST_HIT_DHI": "2026-09-22",
+    "MAG7_TRIM_AAPL": "2026-09-22",
+    "F13_伯克希尔": "2026-09-22"
   }
 }
