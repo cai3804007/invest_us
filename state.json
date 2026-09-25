@@ -1,8 +1,9 @@
 {
-  "date": "2026-09-24",
-  "risk_score": -10,
-  "risk_level": "低风险 (Risk-On)",
+  "date": "2026-09-25",
+  "risk_score": 5,
+  "risk_level": "中低风险",
   "danger_ids": [
+    "COMBO_DXY_VIX",
     "US10Y_HIGH"
   ],
   "cycle": "expansion",
@@ -14,8 +15,8 @@
   },
   "weekly_cross": null,
   "drawdown_52w": {
-    "SPY": -1.049443268371808,
-    "QQQ": -0.8361651213807164
+    "SPY": -1.130634362647942,
+    "QQQ": -0.8508878334300252
   },
   "mag7_levels": {
     "AAPL": "trim",
@@ -37,7 +38,7 @@
       "low": 131.59842854423437,
       "high": 170.28252016433876,
       "alerted": true,
-      "last_price": 140.1699981689453
+      "last_price": 140.35000610351562
     }
   },
   "mag7_price_tier": {
@@ -46,7 +47,8 @@
     "GOOGL": "deep",
     "AMZN": "deep",
     "NVDA": "deep",
-    "TSLA": null
+    "TSLA": null,
+    "META": null
   },
   "position_actions": {
     "QQQM": "hold",
