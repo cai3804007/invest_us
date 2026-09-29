@@ -1,5 +1,5 @@
 {
-  "date": "2026-09-26",
+  "date": "2026-09-29",
   "risk_score": -10,
   "risk_level": "低风险 (Risk-On)",
   "danger_ids": [
@@ -14,8 +14,8 @@
   },
   "weekly_cross": null,
   "drawdown_52w": {
-    "SPY": -0.5932330109680306,
-    "QQQ": -0.396010741128916
+    "SPY": -1.332967100301996,
+    "QQQ": -1.4622845843895949
   },
   "mag7_levels": {
     "AAPL": "trim",
@@ -24,7 +24,7 @@
     "AMZN": "buy",
     "NVDA": "buy",
     "META": "hold",
-    "TSLA": "sell"
+    "TSLA": "hold"
   },
   "f13_filed": {
     "伯克希尔": "2026-08-14"
@@ -37,7 +37,7 @@
       "low": 131.59842854423437,
       "high": 170.28252016433876,
       "alerted": true,
-      "last_price": 141.50999450683594
+      "last_price": 139.4199981689453
     }
   },
   "mag7_price_tier": {
