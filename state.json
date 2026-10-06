@@ -1,6 +1,6 @@
 {
-  "date": "2026-10-03",
-  "risk_score": -5,
+  "date": "2026-10-06",
+  "risk_score": -10,
   "risk_level": "低风险 (Risk-On)",
   "danger_ids": [
     "US10Y_HIGH"
@@ -14,7 +14,7 @@
   },
   "weekly_cross": null,
   "drawdown_52w": {
-    "SPY": -0.8136020961492241,
+    "SPY": -0.14474699834038374,
     "QQQ": 0.0
   },
   "mag7_levels": {
@@ -37,7 +37,7 @@
       "low": 131.59842854423437,
       "high": 170.28252016433876,
       "alerted": true,
-      "last_price": 135.0
+      "last_price": 133.22999572753906
     }
   },
   "mag7_price_tier": {
@@ -50,7 +50,7 @@
     "META": null
   },
   "position_actions": {
-    "QQQM": "consider_sell",
+    "QQQM": "hold",
     "SPYM": "hold"
   },
   "recommendation": "持有观望",
