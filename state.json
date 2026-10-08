@@ -1,5 +1,5 @@
 {
-  "date": "2026-10-07",
+  "date": "2026-10-08",
   "risk_score": 0,
   "risk_level": "低风险 (Risk-On)",
   "danger_ids": [
@@ -15,8 +15,8 @@
   },
   "weekly_cross": null,
   "drawdown_52w": {
-    "SPY": 0.0,
-    "QQQ": 0.0
+    "SPY": -0.24003081645026514,
+    "QQQ": -0.25406007213888415
   },
   "mag7_levels": {
     "AAPL": "trim",
@@ -38,7 +38,7 @@
       "low": 131.59842854423437,
       "high": 170.28252016433876,
       "alerted": true,
-      "last_price": 136.75
+      "last_price": 133.27999877929688
     }
   },
   "mag7_price_tier": {
