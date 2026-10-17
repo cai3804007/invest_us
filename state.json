@@ -1,8 +1,9 @@
 {
-  "date": "2026-10-16",
-  "risk_score": 10,
-  "risk_level": "中低风险（但有3项危险信号，勿只看总分）",
+  "date": "2026-10-17",
+  "risk_score": 40,
+  "risk_level": "中等风险",
   "danger_ids": [
+    "LEADERS_WEAK",
     "SOX_BELOW_MA50",
     "SOX_WEAKER_QQQ",
     "US10Y_HIGH"
@@ -16,8 +17,8 @@
   },
   "weekly_cross": null,
   "drawdown_52w": {
-    "SPY": -0.9369968266169648,
-    "QQQ": -4.1676505625902855
+    "SPY": -2.0331446058168168,
+    "QQQ": -6.563460905432783
   },
   "mag7_levels": {
     "AAPL": "trim",
@@ -39,7 +40,7 @@
       "low": 131.59842854423437,
       "high": 170.28252016433876,
       "alerted": true,
-      "last_price": 139.5500030517578
+      "last_price": 139.38999938964844
     }
   },
   "mag7_price_tier": {
@@ -52,8 +53,8 @@
     "META": null
   },
   "position_actions": {
-    "QQQM": "hold",
-    "SPYM": "hold"
+    "QQQM": "buy",
+    "SPYM": "consider_buy"
   },
   "recommendation": "谨慎持有",
   "last_fired": {
@@ -72,8 +73,10 @@
     "COST_HIT_DHI": "2026-09-22",
     "MAG7_TRIM_AAPL": "2026-09-22",
     "F13_伯克希尔": "2026-09-22",
-    "POS_QQQM": "2026-10-09",
+    "POS_QQQM": "2026-10-17",
     "POS_SPYM": "2026-10-09",
-    "STREAK_QQQ": "2026-10-16"
+    "STREAK_QQQ": "2026-10-17",
+    "DAYDROP_QQQ": "2026-10-17",
+    "EXTREME_FEAR": "2026-10-17"
   }
 }
