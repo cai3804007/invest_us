@@ -1,7 +1,7 @@
 {
-  "date": "2026-10-23",
-  "risk_score": 35,
-  "risk_level": "中等风险",
+  "date": "2026-10-24",
+  "risk_score": 25,
+  "risk_level": "中低风险（但有4项危险信号，勿只看总分）",
   "danger_ids": [
     "LEADERS_WEAK",
     "SOX_BELOW_MA50",
@@ -17,12 +17,12 @@
   },
   "weekly_cross": null,
   "drawdown_52w": {
-    "SPY": -1.9420098270131358,
-    "QQQ": -7.265092856341127
+    "SPY": -2.4541523435379298,
+    "QQQ": -7.274300434933556
   },
   "mag7_levels": {
     "AAPL": "trim",
-    "MSFT": "buy",
+    "MSFT": "hold",
     "GOOGL": "buy",
     "AMZN": "buy",
     "NVDA": "buy",
@@ -40,7 +40,7 @@
       "low": 131.59842854423437,
       "high": 170.28252016433876,
       "alerted": true,
-      "last_price": 147.66000366210938
+      "last_price": 147.47999572753906
     }
   },
   "mag7_price_tier": {
@@ -53,8 +53,8 @@
     "META": "buy"
   },
   "position_actions": {
-    "QQQM": "consider_buy",
-    "SPYM": "consider_buy"
+    "QQQM": "hold",
+    "SPYM": "hold"
   },
   "recommendation": "谨慎持有",
   "last_fired": {
